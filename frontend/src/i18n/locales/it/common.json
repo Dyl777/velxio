@@ -75,6 +75,22 @@
       "subtitle": "Velxio è gratuito e open source. Se ti fa risparmiare tempo, considera di supportarne lo sviluppo.",
       "ctaSponsors": "GitHub Sponsors",
       "ctaPaypal": "Dona tramite PayPal"
+    },
+    "licensing": {
+      "label": "Licenze",
+      "title": "Gratuito, con opzione commerciale.",
+      "subtitle": "AGPLv3 per la versione open-source. Licenza commerciale per i team che devono integrare Velxio in prodotti closed-source.",
+      "opensource": {
+        "title": "Open source — AGPLv3",
+        "desc": "Gratis per sempre per uso personale, formazione, ricerca e self-hosting. Modifica, fai il fork e ridistribuisci — le tue modifiche restano sotto AGPLv3.",
+        "cta": "Vedi sorgenti su GitHub →"
+      },
+      "commercial": {
+        "badge": "Commerciale",
+        "title": "Licenza commerciale",
+        "desc": "Per prodotti closed-source, SaaS proprietari o uso interno aziendale dove la reciprocità AGPLv3 non è compatibile con il tuo modello di business.",
+        "cta": "Contatta per prezzi →"
+      }
     }
   },
   "profile": {

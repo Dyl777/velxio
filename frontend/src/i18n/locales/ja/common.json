@@ -75,6 +75,22 @@
       "subtitle": "Velxioは無料でオープンソースです。時間を節約できたなら、開発を支援することを検討してください。",
       "ctaSponsors": "GitHub Sponsors",
       "ctaPaypal": "PayPalで寄付"
+    },
+    "licensing": {
+      "label": "ライセンス",
+      "title": "無料、商用オプションあり。",
+      "subtitle": "オープンソース版はAGPLv3。クローズドソース製品にVelxioを組み込む必要があるチーム向けの商用ライセンスもあります。",
+      "opensource": {
+        "title": "オープンソース — AGPLv3",
+        "desc": "個人利用・教育・研究・セルフホスティングは永久無料。改変・フォーク・再配布も自由 — ただし変更内容もAGPLv3で公開する必要があります。",
+        "cta": "GitHubでソースを見る →"
+      },
+      "commercial": {
+        "badge": "商用",
+        "title": "商用ライセンス",
+        "desc": "クローズドソース製品、プロプライエタリSaaS、AGPLv3の相互ライセンス条件がビジネスモデルに合わない社内利用向け。",
+        "cta": "価格を問い合わせる →"
+      }
     }
   },
   "profile": {

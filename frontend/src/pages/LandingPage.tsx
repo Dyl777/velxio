@@ -1215,6 +1215,44 @@ export const LandingPage: React.FC = () => {
         </div>
       </section>
 
+      {/* Licensing */}
+      <section className="landing-section landing-licensing">
+        <div className="section-header">
+          <span className="section-label">{t('landing.licensing.label')}</span>
+          <h2 className="section-title">{t('landing.licensing.title')}</h2>
+          <p className="section-sub">{t('landing.licensing.subtitle')}</p>
+        </div>
+        <div className="licensing-grid">
+          <div className="licensing-card">
+            <span className="licensing-card-badge">AGPLv3</span>
+            <h3 className="licensing-card-title">{t('landing.licensing.opensource.title')}</h3>
+            <p className="licensing-card-desc">{t('landing.licensing.opensource.desc')}</p>
+            <a
+              href={GITHUB_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="licensing-card-link"
+              onClick={trackVisitGitHub}
+            >
+              {t('landing.licensing.opensource.cta')}
+            </a>
+          </div>
+          <div className="licensing-card">
+            <span className="licensing-card-badge licensing-card-badge-commercial">
+              {t('landing.licensing.commercial.badge')}
+            </span>
+            <h3 className="licensing-card-title">{t('landing.licensing.commercial.title')}</h3>
+            <p className="licensing-card-desc">{t('landing.licensing.commercial.desc')}</p>
+            <a
+              href="mailto:info@velxio.dev?subject=Velxio%20commercial%20license"
+              className="licensing-card-link"
+            >
+              {t('landing.licensing.commercial.cta')}
+            </a>
+          </div>
+        </div>
+      </section>
+
       {/* Footer */}
       <footer className="landing-footer">
         <div className="footer-brand">

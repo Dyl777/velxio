@@ -75,6 +75,22 @@
       "subtitle": "Velxio 是免费且开源的。如果它为你节省了时间，请考虑支持其开发。",
       "ctaSponsors": "GitHub Sponsors",
       "ctaPaypal": "通过 PayPal 捐赠"
+    },
+    "licensing": {
+      "label": "许可证",
+      "title": "免费,提供商业选项。",
+      "subtitle": "开源版本采用 AGPLv3 协议。需要将 Velxio 集成到闭源产品中的团队可选择商业许可。",
+      "opensource": {
+        "title": "开源 — AGPLv3",
+        "desc": "个人使用、教育、研究和自托管永久免费。可修改、Fork 并重新分发 — 您的修改也必须以 AGPLv3 协议发布。",
+        "cta": "在 GitHub 上查看源代码 →"
+      },
+      "commercial": {
+        "badge": "商业",
+        "title": "商业许可证",
+        "desc": "适用于闭源产品、专有 SaaS 或 AGPLv3 协议的互惠条款与您的商业模式不兼容的企业内部使用场景。",
+        "cta": "联系咨询定价 →"
+      }
     }
   },
   "profile": {
