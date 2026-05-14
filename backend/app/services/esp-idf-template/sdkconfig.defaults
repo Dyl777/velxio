@@ -25,6 +25,15 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # WiFi
 CONFIG_ESP_WIFI_ENABLED=y
 
+# mbedTLS — PSK ciphersuites must be enabled or arduino-esp32 v2.0.17's
+# ssl_client.cpp compiles to an empty translation unit (its body is wrapped
+# in `#if !defined(MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED) ... #else ... #endif`).
+# Without these, any sketch that pulls in HTTPClient or WiFiClientSecure
+# fails to link with undefined references to ssl_init / start_ssl_client /
+# stop_ssl_socket / send_ssl_data / get_ssl_receive / data_to_read.
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
 # LWIP — reassembly needed for slirp networking
 CONFIG_LWIP_IP4_REASSEMBLY=y
 CONFIG_LWIP_IP6_REASSEMBLY=y
