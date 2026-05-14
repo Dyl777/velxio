@@ -121,7 +121,7 @@
         "free": {
           "name": "Free",
           "tagline": "Discover the simulator + light AI help.",
-          "f1": "20 daily AI credits (up to 300/month)",
+          "f1": "100 daily AI credits (up to 1,500/month)",
           "f2": "All 19 boards + 48+ components",
           "f3": "Real CPU emulation, public projects",
           "cta": "Get started"
@@ -129,7 +129,7 @@
         "pro": {
           "name": "Pro",
           "tagline": "For makers building real projects with AI.",
-          "f1": "400 daily AI credits (up to 12,000/month)",
+          "f1": "500 daily AI credits (up to 15,000/month)",
           "f2": "Private projects + premium components",
           "f3": "Priority compile queue, cancel anytime",
           "cta": "Subscribe to Pro"
@@ -137,7 +137,7 @@
         "pro_max": {
           "name": "Pro Max",
           "tagline": "For power users and small teams.",
-          "f1": "1,000 daily AI credits (up to 30,000/month)",
+          "f1": "2,000 daily AI credits (up to 60,000/month)",
           "f2": "Early access to new boards",
           "f3": "Direct support from the maintainer",
           "cta": "Choose Pro Max"

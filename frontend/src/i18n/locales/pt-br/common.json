@@ -121,7 +121,7 @@
         "free": {
           "name": "Free",
           "tagline": "Descubra o simulador + ajuda leve da IA.",
-          "f1": "20 créditos diários de IA (até 300/mês)",
+          "f1": "100 créditos diários de IA (até 1.500/mês)",
           "f2": "Todas as 19 placas + 48+ componentes",
           "f3": "Emulação real de CPU, projetos públicos",
           "cta": "Começar"
@@ -129,7 +129,7 @@
         "pro": {
           "name": "Pro",
           "tagline": "Para makers construindo projetos reais.",
-          "f1": "400 créditos diários de IA (até 12.000/mês)",
+          "f1": "500 créditos diários de IA (até 15.000/mês)",
           "f2": "Projetos privados + componentes premium",
           "f3": "Fila de compilação prioritária, cancele a qualquer momento",
           "cta": "Assinar Pro"
@@ -137,7 +137,7 @@
         "pro_max": {
           "name": "Pro Max",
           "tagline": "Para power users e times pequenos.",
-          "f1": "1.000 créditos diários de IA (até 30.000/mês)",
+          "f1": "2.000 créditos diários de IA (até 60.000/mês)",
           "f2": "Acesso antecipado a novas placas",
           "f3": "Suporte direto do mantenedor",
           "cta": "Escolher Pro Max"

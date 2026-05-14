@@ -121,7 +121,7 @@
         "free": {
           "name": "Free",
           "tagline": "Entdecke den Simulator + leichte KI-Hilfe.",
-          "f1": "20 KI-Credits pro Tag (bis zu 300/Monat)",
+          "f1": "100 KI-Credits pro Tag (bis zu 1.500/Monat)",
           "f2": "Alle 19 Boards + 48+ Komponenten",
           "f3": "Echte CPU-Emulation, öffentliche Projekte",
           "cta": "Loslegen"
@@ -129,7 +129,7 @@
         "pro": {
           "name": "Pro",
           "tagline": "Für Maker mit echten Projekten.",
-          "f1": "400 KI-Credits pro Tag (bis zu 12.000/Monat)",
+          "f1": "500 KI-Credits pro Tag (bis zu 15.000/Monat)",
           "f2": "Private Projekte + Premium-Komponenten",
           "f3": "Priorisierte Kompilier-Warteschlange, jederzeit kündbar",
           "cta": "Pro abonnieren"
@@ -137,7 +137,7 @@
         "pro_max": {
           "name": "Pro Max",
           "tagline": "Für Power-User und kleine Teams.",
-          "f1": "1.000 KI-Credits pro Tag (bis zu 30.000/Monat)",
+          "f1": "2.000 KI-Credits pro Tag (bis zu 60.000/Monat)",
           "f2": "Früher Zugriff auf neue Boards",
           "f3": "Direkter Support vom Maintainer",
           "cta": "Pro Max wählen"
