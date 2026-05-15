@@ -1,77 +1,47 @@
 /**
- * MixedModeScheduler — orchestrates the digital ↔ SPICE coupling for
- * Phase 1b of the mixed-mode simulator project.
+ * MixedModeScheduler — voltage event bus + solver orchestrator.
  *
- * Architecture in three layers:
+ * Architecture (Phase 1c onwards):
  *
- *   ┌────────────────────────────┐
- *   │ MCU sim (AVR / RP2040 /    │  fires PinManager.onPinChange()
- *   │ ESP32 bridge)              │  events on every digitalWrite()
- *   └─────────────┬──────────────┘
- *                 │ pin edge
- *                 ▼
- *   ┌────────────────────────────┐
- *   │ MixedModeScheduler         │  batches edges, builds netlist via
- *   │   • alter V_pin sources    │  NetlistBuilder, drives ngspice via
- *   │   • short tran advance     │  NgSpiceInteractive
- *   │   • read v(node) for each  │
- *   │     component pin          │
- *   └─────────────┬──────────────┘
- *                 │ node voltage event
- *                 ▼
- *   ┌────────────────────────────┐
- *   │ SpiceResolvedPinResolver   │  threshold-converts v → HIGH/LOW,
- *   │                            │  fires component handler callback
- *   └────────────────────────────┘
+ *   ┌─────────────────────────────┐
+ *   │ CircuitSimulationService    │  builds netlist, calls scheduler
+ *   │  (or any caller of the      │  loadCircuit + resolveDc / onMcu
+ *   │   public methods below)     │
+ *   └────────────┬────────────────┘
+ *                │
+ *                ▼
+ *   ┌─────────────────────────────┐
+ *   │ MixedModeScheduler          │
+ *   │  • injects a SolverPort     │  ── solver.loadCircuit / solve / alter
+ *   │  • caches voltages          │
+ *   │  • fans out to subscribers  │  ── SpiceResolvedPinResolver.onChange
+ *   └────────────┬────────────────┘
+ *                │ SolverPort
+ *                ▼
+ *   ┌─────────────────────────────┐
+ *   │ NgSpiceWorkerAdapter (prod) │
+ *   │ NgSpiceNodeAdapter (tests)  │
+ *   │ FakeSolverAdapter (unit)    │
+ *   └─────────────────────────────┘
  *
- * Phase 1a vendored NgSpiceInteractive and the WASM build.  This file is
- * the Phase 1b skeleton — the API and lifecycle are in place, but the
- * actual `alter + tran + readVec` loop is marked TODO because
- * (a) the WASM is single-threaded, so `bg_run` is not useful and we
- *     need the short-tran workaround, and
- * (b) the netlist build flow needs to be re-wired from the existing
- *     200 ms polling in `subscribeToStore.ts` to event-driven.
+ * The scheduler does NOT know about ngspice, WASM, or Web Workers —
+ * those are adapter concerns.  Domain code (PinResolver, components)
+ * sees only the SpiceVoltageSource interface (`subscribe`,
+ * `getCurrentVoltage`).
  *
- * For now, the scheduler exposes the API surface that component
- * handlers and DynamicComponent will use, plus a `start()` /
- * `stop()` lifecycle controlled by `useSimulatorStore.boards[*].running`.
- * When `start()` is called the scheduler logs "started" and components
- * subscribing to it get FLOATING resolutions — i.e. behavior
- * indistinguishable from "SPICE not available".  Phase 1b's next
- * sub-task replaces the stub data flow with real readVec calls.
- *
- * See:
- *   project/sim-mixedmode/phase-01-mixed-mode-coupling.md
- *   simulation/spice/wasm/NgSpiceInteractive.ts
+ * The cache + fan-out semantics live here because they're tied to
+ * the (componentId, componentPinName) pair, which is a domain
+ * concept.  The solver speaks SPICE-net names; the scheduler maps
+ * between the two via the pinNetMap.
  */
 
-import { NgSpiceInteractive } from './wasm/NgSpiceInteractive';
+import type { SolverPort, SolveAnalysis } from './ports/SolverPort';
+import { NgSpiceWorkerAdapter } from './adapters/NgSpiceWorkerAdapter';
 import type { PinState, SpiceVoltageSource } from '../PinResolver';
 
 /**
- * The subset of NgSpiceInteractive the scheduler depends on.  Spelled
- * out as an interface so unit tests can inject a mock without booting
- * the WASM worker.
- */
-export interface NgSpiceClient {
-  init(): Promise<void>;
-  loadNetlist(netlist: string): Promise<void>;
-  command(cmd: string): Promise<{ rc: number; stdout: string[]; stderr: string[] }>;
-  alter(sourceName: string, dcValue: number): Promise<unknown>;
-  readVec(name: string): Promise<{
-    name: string;
-    real: Float64Array;
-    imag: Float64Array | null;
-    complex: boolean;
-    unit: string;
-  }>;
-  dispose(): void;
-}
-
-/**
  * Identity of a "pin of interest" — a place a SpiceResolvedPinResolver
- * is watching for voltage changes.  The (boardId, pinName) → SPICE-net
- * mapping is built lazily as components register.
+ * is watching for voltage changes.
  */
 export interface NodeSubscription {
   componentId: string;
@@ -81,22 +51,14 @@ export interface NodeSubscription {
 
 type SubscriptionToken = number;
 
-/**
- * Singleton-style scheduler.  Multiple components use the same SPICE
- * engine instance; there's no value in running parallel solvers.
- *
- * Phase 1b: the scheduler holds the engine + the subscription registry
- * but does NOT yet drive real SPICE solves on pin edges.  Phase 1b
- * continued: implement the alter+tran+readVec loop, hook NetlistBuilder.
- */
 /** Voltage cache key = `${componentId}|${componentPinName}`. */
 function pinKey(componentId: string, componentPinName: string): string {
   return `${componentId}|${componentPinName}`;
 }
 
 class MixedModeSchedulerImpl implements SpiceVoltageSource {
-  private engine: NgSpiceClient | null = null;
-  private engineFactory: () => NgSpiceClient = () => new NgSpiceInteractive();
+  private solver: SolverPort | null = null;
+  private solverFactory: () => SolverPort = () => new NgSpiceWorkerAdapter();
   private nextToken: SubscriptionToken = 1;
   private subscriptions = new Map<SubscriptionToken, NodeSubscription>();
   private voltages = new Map<string, number>();
@@ -105,63 +67,90 @@ class MixedModeSchedulerImpl implements SpiceVoltageSource {
   private running = false;
   private initPromise: Promise<void> | null = null;
 
-  /** True while the scheduler is actively driving the SPICE engine. */
+  /** True while the scheduler is actively driving the solver. */
   isRunning(): boolean {
     return this.running;
   }
 
-  /**
-   * Start the scheduler.  Lazy-loads the WASM engine on first call.  No-op
-   * if already running.  Called from `useSimulatorStore` when any board
-   * transitions to running.
-   */
+  /** Lazy-boot the solver (idempotent). */
   async start(): Promise<void> {
     if (this.running) return;
-    if (!this.engine) {
-      this.engine = this.engineFactory();
-    }
-    if (!this.initPromise) {
-      this.initPromise = this.engine.init();
-    }
-    await this.initPromise;
+    await this.ensureSolver();
     this.running = true;
   }
 
+  private async ensureSolver(): Promise<SolverPort> {
+    if (!this.solver) this.solver = this.solverFactory();
+    if (!this.initPromise) this.initPromise = this.solver.init();
+    await this.initPromise;
+    return this.solver;
+  }
+
   /**
-   * Load a SPICE netlist plus the (component, pin) → SPICE-net mapping
-   * produced by `NetlistBuilder.buildNetlist`.  Replaces any previously
-   * loaded circuit.  Subsequent `resolveDc` / `alter` / `onMcuPinChange`
-   * calls operate on this circuit.
-   *
-   * Idempotent in the sense that calling it again with a fresh circuit
-   * simply re-loads — the engine is kept warm.  Pin-net mapping keys
-   * use the NetlistBuilder convention `${componentId}:${pinName}`.
+   * Load a SPICE netlist plus the (component, pin) → SPICE-net map
+   * produced by `NetlistBuilder.buildNetlist`.  Replaces any
+   * previously loaded circuit; clears the voltage cache.
    */
   async loadCircuit(netlist: string, pinNetMap: Map<string, string>): Promise<void> {
-    if (!this.engine) {
-      this.engine = this.engineFactory();
-    }
-    if (!this.initPromise) {
-      this.initPromise = this.engine.init();
-    }
-    await this.initPromise;
-    await this.engine.loadNetlist(netlist);
+    const solver = await this.ensureSolver();
+    await solver.loadCircuit(netlist);
     this.pinNetMap = new Map(pinNetMap);
-    // Voltages cache is now stale — clear it.  resolveDc() will repopulate.
     this.voltages.clear();
   }
 
   /**
-   * Run a DC operating-point solve and publish the resolved voltage for
-   * every (component, pin) currently in the pinNetMap.  Subscribers
-   * fire as voltages land in the cache.  Ground pins (canonical net
-   * `0`) are published as 0 V without a readVec round-trip.
+   * Run a `.op` solve and publish voltages for every (component, pin)
+   * currently in pinNetMap.  Ground pins (net = `0`) publish 0 V
+   * without a vector read.
    */
   async resolveDc(): Promise<void> {
-    if (!this.engine) {
+    if (!this.solver) {
       throw new Error('MixedModeScheduler.resolveDc(): call loadCircuit first');
     }
-    await this.engine.command('op');
+    await this.solveAndPublish({ kind: 'op' });
+  }
+
+  /**
+   * Run a `.tran` solve and publish the steady-state (last-sample)
+   * voltage for every (component, pin) in pinNetMap.  The full
+   * waveform is available via `getLastResult()` for callers that need
+   * the time series.
+   */
+  async resolveTran(step: string, stop: string): Promise<void> {
+    if (!this.solver) {
+      throw new Error('MixedModeScheduler.resolveTran(): call loadCircuit first');
+    }
+    await this.solveAndPublish({ kind: 'tran', step, stop });
+  }
+
+  private lastResult: import('./ports/SolverPort').SolveResult | null = null;
+
+  /**
+   * Last full solve result, for callers that need the raw vectors
+   * (e.g. CircuitSimulationService when populating useElectricalStore).
+   */
+  getLastResult(): import('./ports/SolverPort').SolveResult | null {
+    return this.lastResult;
+  }
+
+  private async solveAndPublish(analysis: SolveAnalysis): Promise<void> {
+    const solver = this.solver;
+    if (!solver) return;
+
+    // Build vectorsOfInterest from pinNetMap — every distinct non-ground
+    // net needs a v(<net>) read.
+    const vectorsOfInterest = new Set<string>();
+    for (const net of this.pinNetMap.values()) {
+      if (net !== '0') vectorsOfInterest.add(`v(${net})`);
+    }
+
+    const result = await solver.solve(analysis, {
+      vectorsOfInterest: Array.from(vectorsOfInterest),
+    });
+    this.lastResult = result;
+
+    // Publish the last sample per (component, pin).  For .op that's
+    // the single point; for .tran it's the steady-state.
     for (const [key, net] of this.pinNetMap) {
       const idx = key.indexOf(':');
       if (idx < 0) continue;
@@ -171,55 +160,37 @@ class MixedModeSchedulerImpl implements SpiceVoltageSource {
         this.publishVoltage(componentId, pinName, 0);
         continue;
       }
-      try {
-        const vec = await this.engine.readVec(`v(${net})`);
-        const v = vec.real[0] ?? 0;
-        this.publishVoltage(componentId, pinName, v);
-      } catch {
-        // Net wasn't part of this analysis — skip silently so a single
-        // disconnected component pin doesn't break the whole resolve.
-      }
+      const vec = result.vectors.get(`v(${net})`);
+      if (!vec) continue; // disconnected pin — leave unpublished
+      const v = vec.real[vec.real.length - 1] ?? 0;
+      this.publishVoltage(componentId, pinName, v);
     }
   }
 
-  /**
-   * Stop the scheduler.  Components stay subscribed but stop receiving
-   * SPICE-resolved events until the next start().
-   */
+  /** Stop the scheduler.  Engine stays warm so restart is cheap. */
   stop(): void {
     if (!this.running) return;
     this.running = false;
-    // TODO Phase 1b — pause the SPICE driver loop.  Engine instance is
-    // intentionally kept warm so restart is cheap; dispose only on
-    // unmount or shutdown.
   }
 
-  /**
-   * Tear down the engine entirely.  Used on app unmount; in normal flow
-   * we just stop() + start() to avoid re-paying the ~2-5 s WASM init
-   * cost.
-   */
+  /** Tear down the solver entirely. */
   dispose(): void {
     this.running = false;
-    if (this.engine) {
-      this.engine.dispose();
-      this.engine = null;
+    if (this.solver) {
+      this.solver.dispose();
+      this.solver = null;
     }
     this.initPromise = null;
     this.subscriptions.clear();
     this.voltages.clear();
     this.pinNetMap.clear();
+    this.lastResult = null;
   }
 
   /**
-   * Register a component pin to receive SPICE-resolved voltage events.
-   * Implements the SpiceVoltageSource contract used by
-   * `createSpiceResolvedPinResolver`.  Returns an unsubscribe handle.
-   *
-   * Phase 1b: stub — no events ever fire.  The caller's resolver will
-   * report whatever its fallback state is (typically FLOATING) and
-   * never transition.  Phase 1b continued: actually emit events when
-   * SPICE solves complete.
+   * Register a component pin to receive voltage events.  Implements
+   * `SpiceVoltageSource` so `createSpiceResolvedPinResolver` can use
+   * the scheduler directly.
    */
   subscribe(
     componentId: string,
@@ -233,56 +204,31 @@ class MixedModeSchedulerImpl implements SpiceVoltageSource {
     };
   }
 
-  /**
-   * Look up the latest known voltage on a component pin's SPICE net.
-   * Returns the value last published via `publishVoltage`, or null if
-   * nothing has been published for that pin yet.  Phase 1b continued
-   * will populate this cache from `NgSpiceInteractive.readVec` after
-   * each solve.
-   */
+  /** Latest cached voltage for a (component, pin), or null. */
   getCurrentVoltage(componentId: string, componentPinName: string): number | null {
     const v = this.voltages.get(pinKey(componentId, componentPinName));
     return v === undefined ? null : v;
   }
 
   /**
-   * Publish a freshly-resolved voltage for a (component, pin) and
-   * notify all subscribers watching that key.  Stores the value in
-   * the cache so subsequent `getCurrentVoltage` calls see it.
-   *
-   * The SPICE-resolved PinResolver does its own threshold conversion,
-   * so this layer only forwards raw volts with a placeholder
-   * `'UNKNOWN'` state — the resolver re-derives HIGH/LOW from the
-   * voltage using its configured thresholds.  Skipping the threshold
-   * decision here keeps the scheduler I/O-family-agnostic.
+   * Publish a freshly-resolved voltage and notify subscribers.
+   * SpiceResolvedPinResolver does its own threshold conversion, so
+   * this layer forwards the raw volts with an `'UNKNOWN'` sentinel
+   * state — the resolver re-derives HIGH/LOW.
    */
   publishVoltage(componentId: string, componentPinName: string, voltage: number): void {
     this.voltages.set(pinKey(componentId, componentPinName), voltage);
     for (const sub of this.subscriptions.values()) {
       if (sub.componentId === componentId && sub.componentPinName === componentPinName) {
-        // 'UNKNOWN' is a sentinel — the SpiceResolvedPinResolver re-
-        // computes the state from the voltage via its threshold
-        // configuration.  We could pass any string here; 'UNKNOWN' is
-        // the convention used in the Phase 1b unit tests.
         sub.cb('UNKNOWN' as PinState, voltage);
       }
     }
   }
 
   /**
-   * Notify the scheduler that an MCU pin changed state.  Issues an
-   * `alter V_<board>_<pin> dc <voltage>` to ngspice, re-runs the DC
-   * operating point, and refreshes the voltage cache + subscribers for
-   * every (component, pin) in the current pinNetMap.
-   *
-   * Caller is responsible for converting the digital state to a
-   * voltage: typically `state ? vcc : 0`, but a board with output
-   * impedance or open-drain semantics may use a different mapping.
-   *
-   * Returns a promise that resolves after the resulting `resolveDc`
-   * completes.  When `start()` hasn't been called yet (no engine), the
-   * call is a silent no-op so legacy code paths that fire this
-   * unconditionally don't crash.
+   * MCU pin transition → alter the corresponding V source + re-resolve.
+   * Silent no-op when no solver has been started (lets legacy callers
+   * fire without crashing).
    */
   async onMcuPinChange(
     boardId: string,
@@ -290,15 +236,15 @@ class MixedModeSchedulerImpl implements SpiceVoltageSource {
     state: boolean,
     vcc: number,
   ): Promise<void> {
-    if (!this.engine) return;
+    if (!this.solver) return;
     const sourceName = `V_${boardId}_${pinName}`;
     const voltage = state ? vcc : 0;
-    await this.engine.alter(sourceName, voltage);
+    await this.solver.alterSource(sourceName, voltage);
     await this.resolveDc();
   }
 }
 
-/** The one and only scheduler.  Lazily constructed. */
+/** Singleton accessor. */
 let instance: MixedModeSchedulerImpl | null = null;
 
 export function getMixedModeScheduler(): MixedModeSchedulerImpl {
@@ -306,24 +252,21 @@ export function getMixedModeScheduler(): MixedModeSchedulerImpl {
   return instance;
 }
 
-/** Test helper — drops the singleton so test runs don't pollute each
- *  other. NEVER call from production code. */
+/** Test helper — drop the singleton so each test starts clean. */
 export function __resetMixedModeScheduler(): void {
   if (instance) instance.dispose();
   instance = null;
 }
 
-/** Test helper — inject a fake NgSpiceClient so `loadCircuit` /
- *  `resolveDc` can be exercised without a real WASM worker. The factory
- *  is invoked the next time the scheduler instantiates its engine.
- *  Must be called BEFORE `start()` / `loadCircuit()`. */
-export function __setSchedulerEngineFactoryForTests(
-  factory: () => NgSpiceClient,
-): void {
+/**
+ * Test helper — inject a custom SolverPort factory.  Must be called
+ * before any `start()` / `loadCircuit()` on the singleton.
+ */
+export function __setSchedulerSolverFactoryForTests(factory: () => SolverPort): void {
   const sched = getMixedModeScheduler() as unknown as {
-    engineFactory: () => NgSpiceClient;
+    solverFactory: () => SolverPort;
   };
-  sched.engineFactory = factory;
+  sched.solverFactory = factory;
 }
 
 export type MixedModeScheduler = MixedModeSchedulerImpl;

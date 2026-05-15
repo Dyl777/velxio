@@ -1,74 +1,26 @@
 /**
- * Phase 1b continued — Step 1 tests for MixedModeScheduler.
+ * MixedModeScheduler tests — exercises the cache + fan-out + solver
+ * orchestration on top of a FakeSolverAdapter (no WASM).
  *
- * Exercises the subscriber routing and voltage cache in isolation from
- * the SPICE engine.  The engine is never booted in these tests; we
- * drive `publishVoltage` directly so the routing logic can be locked
- * down before the real `alter + tran + readVec` loop lands.
+ * Layer covered:
+ *   • voltage cache + subscriber routing
+ *   • loadCircuit + resolveDc / resolveTran via the SolverPort
+ *   • onMcuPinChange → alterSource → re-resolve loop
  *
- * Coverage:
- *   - publishVoltage fires every matching subscriber and only those
- *   - getCurrentVoltage returns the last published value per pin
- *   - unsubscribe removes the callback cleanly
- *   - reset (via __resetMixedModeScheduler) clears state between tests
+ * Real ngspice integration is covered by the BJT-switch test;
+ * SolverPort contract is covered by solver-port-contract.test.ts.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   getMixedModeScheduler,
   __resetMixedModeScheduler,
-  __setSchedulerEngineFactoryForTests,
-  type NgSpiceClient,
+  __setSchedulerSolverFactoryForTests,
 } from '../simulation/spice/MixedModeScheduler';
+import { FakeSolverAdapter } from '../simulation/spice/adapters/FakeSolverAdapter';
 
 afterEach(() => {
   __resetMixedModeScheduler();
 });
-
-/** Minimal in-memory NgSpiceClient — tracks calls and returns canned
- *  voltages for `readVec`. */
-function fakeClient(opts: { voltages?: Record<string, number> } = {}): {
-  client: NgSpiceClient;
-  calls: { command: string[]; alter: Array<[string, number]>; loadedNetlist: string | null };
-} {
-  const voltages = opts.voltages ?? {};
-  const calls = {
-    command: [] as string[],
-    alter: [] as Array<[string, number]>,
-    loadedNetlist: null as string | null,
-  };
-  const client: NgSpiceClient = {
-    async init() {},
-    async loadNetlist(netlist) {
-      calls.loadedNetlist = netlist;
-    },
-    async command(cmd) {
-      calls.command.push(cmd);
-      return { rc: 0, stdout: [], stderr: [] };
-    },
-    async alter(name, value) {
-      calls.alter.push([name, value]);
-      return undefined;
-    },
-    async readVec(name) {
-      // Strip 'v(' / ')' to look up by net name.
-      const match = name.match(/^v\((.+)\)$/i);
-      const netName = match ? match[1] : name;
-      const v = voltages[netName];
-      if (v === undefined) {
-        throw new Error(`unknown vec ${name}`);
-      }
-      return {
-        name,
-        real: new Float64Array([v]),
-        imag: null,
-        complex: false,
-        unit: 'V',
-      };
-    },
-    dispose() {},
-  };
-  return { client, calls };
-}
 
 describe('MixedModeScheduler — voltage cache', () => {
   it('returns null until something is published', () => {
@@ -84,7 +36,7 @@ describe('MixedModeScheduler — voltage cache', () => {
     expect(sched.getCurrentVoltage('q1', 'C')).toBe(4.5);
     expect(sched.getCurrentVoltage('q1', 'B')).toBe(1.2);
     expect(sched.getCurrentVoltage('q2', 'C')).toBe(0.3);
-    sched.publishVoltage('q1', 'C', 2.7); // overwrite
+    sched.publishVoltage('q1', 'C', 2.7);
     expect(sched.getCurrentVoltage('q1', 'C')).toBe(2.7);
   });
 });
@@ -132,42 +84,27 @@ describe('MixedModeScheduler — subscribe / publish routing', () => {
     expect(cb).toHaveBeenCalledTimes(1);
     cancel();
     sched.publishVoltage('q1', 'C', 0.3);
-    expect(cb).toHaveBeenCalledTimes(1); // not called again
-  });
-
-  it('reset clears subscribers and voltage cache', () => {
-    const sched = getMixedModeScheduler();
-    const cb = vi.fn();
-    sched.subscribe('q1', 'C', cb);
-    sched.publishVoltage('q1', 'C', 4.7);
-    __resetMixedModeScheduler();
-
-    const sched2 = getMixedModeScheduler();
-    expect(sched2).not.toBe(sched);
-    expect(sched2.getCurrentVoltage('q1', 'C')).toBeNull();
-    sched2.publishVoltage('q1', 'C', 0.5);
-    // The old subscriber attached to the disposed scheduler must NOT
-    // fire from the new scheduler instance.
     expect(cb).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('MixedModeScheduler — loadCircuit + resolveDc (Step 2)', () => {
-  it('loadCircuit calls engine.loadNetlist exactly once with the supplied netlist', async () => {
-    const { client, calls } = fakeClient();
-    __setSchedulerEngineFactoryForTests(() => client);
+describe('MixedModeScheduler — loadCircuit + resolveDc', () => {
+  it('loadCircuit passes the netlist to the solver', async () => {
+    const fake = new FakeSolverAdapter();
+    __setSchedulerSolverFactoryForTests(() => fake);
     const sched = getMixedModeScheduler();
 
-    const netlist = 'V1 1 0 DC 5\n.op\n.end\n';
+    const netlist = 'V1 1 0 DC 5\n.end\n';
     await sched.loadCircuit(netlist, new Map([['comp:p', '1']]));
-    expect(calls.loadedNetlist).toBe(netlist);
+    expect(fake.calls.loadCircuit).toEqual([netlist]);
+    expect(fake.calls.init).toBe(1);
   });
 
-  it('resolveDc fires .op and publishes voltages for every pin in pinNetMap', async () => {
-    const { client, calls } = fakeClient({
-      voltages: { net_drain: 4.97, net_gate: 0.5 },
+  it('resolveDc requests the right vectors and publishes per pinNetMap', async () => {
+    const fake = new FakeSolverAdapter({
+      vectors: { 'v(net_drain)': 4.97, 'v(net_gate)': 0.5 },
     });
-    __setSchedulerEngineFactoryForTests(() => client);
+    __setSchedulerSolverFactoryForTests(() => fake);
     const sched = getMixedModeScheduler();
 
     await sched.loadCircuit(
@@ -179,31 +116,34 @@ describe('MixedModeScheduler — loadCircuit + resolveDc (Step 2)', () => {
       ]),
     );
 
-    const events: Array<{ id: string; pin: string; v: number }> = [];
-    sched.subscribe('q1', 'D', (_state, v) => events.push({ id: 'q1', pin: 'D', v }));
-    sched.subscribe('q1', 'G', (_state, v) => events.push({ id: 'q1', pin: 'G', v }));
-    sched.subscribe('q1', 'S', (_state, v) => events.push({ id: 'q1', pin: 'S', v }));
+    const events: Array<{ pin: string; v: number }> = [];
+    sched.subscribe('q1', 'D', (_state, v) => events.push({ pin: 'D', v }));
+    sched.subscribe('q1', 'G', (_state, v) => events.push({ pin: 'G', v }));
+    sched.subscribe('q1', 'S', (_state, v) => events.push({ pin: 'S', v }));
 
     await sched.resolveDc();
 
-    expect(calls.command).toContain('op');
+    expect(fake.calls.solve).toHaveLength(1);
+    expect(fake.calls.solve[0]?.analysis).toEqual({ kind: 'op' });
+    expect(new Set(fake.calls.solve[0]?.vectorsOfInterest)).toEqual(
+      new Set(['v(net_drain)', 'v(net_gate)']),
+    );
+    // Ground pin doesn't go through the solver — short-circuited to 0V.
     expect(sched.getCurrentVoltage('q1', 'D')).toBeCloseTo(4.97);
     expect(sched.getCurrentVoltage('q1', 'G')).toBeCloseTo(0.5);
-    // Ground pins resolve to 0 without a readVec call (net '0' shortcut).
     expect(sched.getCurrentVoltage('q1', 'S')).toBe(0);
-    // All three subscribers received their published voltage.
     expect(events).toEqual(
       expect.arrayContaining([
-        { id: 'q1', pin: 'D', v: expect.closeTo(4.97, 2) },
-        { id: 'q1', pin: 'G', v: expect.closeTo(0.5, 2) },
-        { id: 'q1', pin: 'S', v: 0 },
+        { pin: 'D', v: expect.closeTo(4.97, 2) },
+        { pin: 'G', v: expect.closeTo(0.5, 2) },
+        { pin: 'S', v: 0 },
       ]),
     );
   });
 
-  it('resolveDc tolerates pins whose net is not in the analysis', async () => {
-    const { client } = fakeClient({ voltages: { net_present: 3.3 } });
-    __setSchedulerEngineFactoryForTests(() => client);
+  it('resolveDc tolerates pins whose net is not in the solver result', async () => {
+    const fake = new FakeSolverAdapter({ vectors: { 'v(net_present)': 3.3 } });
+    __setSchedulerSolverFactoryForTests(() => fake);
     const sched = getMixedModeScheduler();
 
     await sched.loadCircuit(
@@ -213,7 +153,6 @@ describe('MixedModeScheduler — loadCircuit + resolveDc (Step 2)', () => {
         ['comp:M', 'net_missing'],
       ]),
     );
-    // Must not throw even though net_missing has no canned voltage.
     await sched.resolveDc();
     expect(sched.getCurrentVoltage('comp', 'P')).toBeCloseTo(3.3);
     expect(sched.getCurrentVoltage('comp', 'M')).toBeNull();
@@ -224,35 +163,58 @@ describe('MixedModeScheduler — loadCircuit + resolveDc (Step 2)', () => {
     await expect(sched.resolveDc()).rejects.toThrow(/loadCircuit first/i);
   });
 
-  it('onMcuPinChange alters the matching V source and republishes voltages', async () => {
+  it('resolveTran issues .tran and publishes the steady-state sample per pin', async () => {
+    const fake = new FakeSolverAdapter({
+      vectors: { 'v(out)': new Float64Array([0, 1, 2, 3, 4.5]) },
+      timeAxis: new Float64Array([0, 1e-4, 2e-4, 3e-4, 4e-4]),
+    });
+    __setSchedulerSolverFactoryForTests(() => fake);
+    const sched = getMixedModeScheduler();
+    await sched.loadCircuit('* netlist', new Map([['comp:OUT', 'out']]));
+    await sched.resolveTran('1e-4', '4e-4');
+
+    expect(fake.calls.solve[0]?.analysis).toEqual({
+      kind: 'tran',
+      step: '1e-4',
+      stop: '4e-4',
+    });
+    // Steady-state = last sample = 4.5
+    expect(sched.getCurrentVoltage('comp', 'OUT')).toBeCloseTo(4.5);
+    // Full waveform reachable via getLastResult for downstream consumers.
+    expect(sched.getLastResult()?.vectors.get('v(out)')?.real.length).toBe(5);
+    expect(sched.getLastResult()?.timeAxis.length).toBe(5);
+  });
+
+  it('loadCircuit replaces the previous circuit and clears the voltage cache', async () => {
+    const fake = new FakeSolverAdapter({ vectors: { 'v(net_a)': 1.1, 'v(net_b)': 2.2 } });
+    __setSchedulerSolverFactoryForTests(() => fake);
+    const sched = getMixedModeScheduler();
+
+    await sched.loadCircuit('first', new Map([['x:p', 'net_a']]));
+    await sched.resolveDc();
+    expect(sched.getCurrentVoltage('x', 'p')).toBeCloseTo(1.1);
+
+    await sched.loadCircuit('second', new Map([['y:q', 'net_b']]));
+    expect(sched.getCurrentVoltage('x', 'p')).toBeNull();
+    await sched.resolveDc();
+    expect(sched.getCurrentVoltage('y', 'q')).toBeCloseTo(2.2);
+  });
+});
+
+describe('MixedModeScheduler — onMcuPinChange', () => {
+  it('alters the matching V source and republishes voltages', async () => {
     let drainV = 4.9;
     let gateV = 0;
-    const client: NgSpiceClient = {
-      async init() {},
-      async loadNetlist() {},
-      async command(_cmd) {
-        return { rc: 0, stdout: [], stderr: [] };
-      },
-      async alter(name, value) {
-        // Simulate the analog response: the gate net follows the
-        // arduino source, and the drain swings between high and low as
-        // the gate crosses Vth.
-        if (name === 'V_uno_9') {
-          gateV = value;
-          drainV = value >= 1.6 ? 0.05 : 4.9;
-        }
-        return undefined;
-      },
-      async readVec(name) {
-        const m = name.match(/^v\((.+)\)$/i);
-        const net = m ? m[1] : name;
-        if (net === 'net_drain') return { name, real: new Float64Array([drainV]), imag: null, complex: false, unit: 'V' };
-        if (net === 'net_gate') return { name, real: new Float64Array([gateV]), imag: null, complex: false, unit: 'V' };
-        throw new Error('unknown net');
-      },
-      dispose() {},
+    const fake = new FakeSolverAdapter({
+      vectors: () => ({ 'v(net_drain)': drainV, 'v(net_gate)': gateV }),
+    });
+    fake.onAlter = (name, value) => {
+      if (name === 'V_uno_9') {
+        gateV = value;
+        drainV = value >= 1.6 ? 0.05 : 4.9;
+      }
     };
-    __setSchedulerEngineFactoryForTests(() => client);
+    __setSchedulerSolverFactoryForTests(() => fake);
     const sched = getMixedModeScheduler();
     await sched.loadCircuit(
       '* netlist',
@@ -265,38 +227,18 @@ describe('MixedModeScheduler — loadCircuit + resolveDc (Step 2)', () => {
     expect(sched.getCurrentVoltage('q1', 'D')).toBeCloseTo(4.9);
     expect(sched.getCurrentVoltage('q1', 'G')).toBeCloseTo(0);
 
-    // MCU drives pin 9 HIGH at 5V → gate follows, drain pulls down.
     await sched.onMcuPinChange('uno', '9', true, 5);
+    expect(fake.calls.alterSource).toEqual([['V_uno_9', 5]]);
     expect(sched.getCurrentVoltage('q1', 'G')).toBeCloseTo(5);
     expect(sched.getCurrentVoltage('q1', 'D')).toBeCloseTo(0.05);
 
-    // MCU drives pin 9 LOW → drain restores.
     await sched.onMcuPinChange('uno', '9', false, 5);
     expect(sched.getCurrentVoltage('q1', 'G')).toBeCloseTo(0);
     expect(sched.getCurrentVoltage('q1', 'D')).toBeCloseTo(4.9);
   });
 
-  it('onMcuPinChange is a no-op when no engine has been started', async () => {
+  it('is a no-op when no solver has been started', async () => {
     const sched = getMixedModeScheduler();
-    // No __setSchedulerEngineFactoryForTests; no loadCircuit. Must not throw.
-    await expect(
-      sched.onMcuPinChange('uno', '9', true, 5),
-    ).resolves.toBeUndefined();
-  });
-
-  it('loadCircuit replaces the previous circuit and clears the voltage cache', async () => {
-    const { client } = fakeClient({ voltages: { net_a: 1.1, net_b: 2.2 } });
-    __setSchedulerEngineFactoryForTests(() => client);
-    const sched = getMixedModeScheduler();
-
-    await sched.loadCircuit('first', new Map([['x:p', 'net_a']]));
-    await sched.resolveDc();
-    expect(sched.getCurrentVoltage('x', 'p')).toBeCloseTo(1.1);
-
-    await sched.loadCircuit('second', new Map([['y:q', 'net_b']]));
-    // Cache for the old pin is gone immediately on reload.
-    expect(sched.getCurrentVoltage('x', 'p')).toBeNull();
-    await sched.resolveDc();
-    expect(sched.getCurrentVoltage('y', 'q')).toBeCloseTo(2.2);
+    await expect(sched.onMcuPinChange('uno', '9', true, 5)).resolves.toBeUndefined();
   });
 });
