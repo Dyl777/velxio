@@ -10,6 +10,7 @@ import {
   connectMixedModeSchedulerToStore,
   isMixedModeEnabled,
 } from '../simulation/spice/connectMixedModeSchedulerToStore';
+import { connectAnalogInputsToMcu } from '../simulation/spice/connectAnalogInputsToMcu';
 import { useSEO } from '../utils/useSEO';
 import { CodeEditor } from '../components/editor/CodeEditor';
 import { EditorToolbar } from '../components/editor/EditorToolbar';
@@ -93,19 +94,29 @@ export const EditorPage: React.FC = () => {
   const [bottomPanelHeight, setBottomPanelHeight] = useState(BOTTOM_PANEL_DEFAULT);
   const [showStarBanner, setShowStarBanner] = useState(false);
 
-  // ── Electrical simulation subscriber (one-time, idempotent) ───────────────
+  // ── Electrical simulation subscribers (one-time, idempotent) ──────────────
+  // Architecture (Phase 1c, in flight):
+  //   1. wireElectricalSolver — legacy solve loop (eecircuit-engine via
+  //      CircuitScheduler).  Still the default until the service migration
+  //      completes.
+  //   2. connectLegacySolverToMixedMode — bridges legacy results into the
+  //      MixedModeScheduler cache so SpiceResolvedPinResolver works.
+  //   3. connectAnalogInputsToMcu — ADC injection + waveform replay. Solver-
+  //      agnostic: subscribes to useElectricalStore regardless of who wrote
+  //      it. Extracted here in Phase 1c step C.
+  //   4. connectMixedModeSchedulerToStore — WASM path behind ?mixedmode=on.
+  //      Will become the default when the service replaces the legacy.
   useEffect(() => {
-    const unsub = wireElectricalSolver();
-    const unsubMixedMode = connectLegacySolverToMixedMode();
-    // Phase 1c step 1 — feature-flagged WASM-driven path. Both connectors
-    // publish into the MixedModeScheduler cache; last write wins. Toggle
-    // via `?mixedmode=on` URL param or `localStorage.velxio.mixedmode='on'`.
+    const unsubSolver = wireElectricalSolver();
+    const unsubBridge = connectLegacySolverToMixedMode();
+    const unsubAdc = connectAnalogInputsToMcu();
     const unsubWasm = isMixedModeEnabled()
       ? connectMixedModeSchedulerToStore()
       : () => {};
     return () => {
-      unsub();
-      unsubMixedMode();
+      unsubSolver();
+      unsubBridge();
+      unsubAdc();
       unsubWasm();
     };
   }, []);
