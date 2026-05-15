@@ -295,30 +295,52 @@ PartSimulationRegistry.register('74hc595', {
 // ─── 7-segment display (direct-drive, when connected directly to Arduino) ────
 
 PartSimulationRegistry.register('7segment', {
-  attachEvents: (element, simulator, getArduinoPinHelper) => {
+  attachEvents: (element, simulator, getArduinoPinHelper, _componentId, getPinResolver) => {
     const pinManager = (simulator as any).pinManager;
     if (!pinManager) return () => {};
 
     const unsubscribers: (() => void)[] = [];
     const s = get7SegState(element);
 
+    // Phase 5 migration of the mixed-mode simulator project: prefer the
+    // PinResolver path so digit-select pins driven through a BJT (the
+    // classic multiplexed 7-segment topology) get SPICE-aware HIGH/LOW
+    // detection instead of relying on the `[C, B]` PASSIVE_PIN_PAIRS
+    // shortcut.  Falls back to direct pinManager + getArduinoPinHelper
+    // for harnesses or builds without Phase 0.
+    const useResolver = typeof getPinResolver === 'function';
+
     // Figure out which digit-select pins this display exposes and subscribe
-    // to whichever ones are actually wired to an Arduino pin. Polarity is
-    // determined by the helper's HIGH/LOW report (we treat HIGH = enabled).
+    // to whichever ones are actually wired. Polarity: HIGH = digit enabled.
     const digitPinNames: string[] = s.digits === 1
       ? ['COM.1', 'COM.2']                                       // 1-digit: both COM pins map to digit 0
       : Array.from({ length: s.digits }, (_, i) => `DIG${i + 1}`); // 2/3/4-digit: DIG1..DIGn
     let digitPinsWired = 0;
     for (let d = 0; d < digitPinNames.length; d++) {
-      const pin = getArduinoPinHelper(digitPinNames[d]);
-      if (pin === null) continue;
-      digitPinsWired++;
+      const pinName = digitPinNames[d];
       const digitIdx = s.digits === 1 ? 0 : d;
-      unsubscribers.push(
-        pinManager.onPinChange(pin, (_: number, state: boolean) => {
-          handle7SegDigit(element, digitIdx, state);
-        }),
-      );
+      if (useResolver) {
+        const resolver = getPinResolver!(pinName);
+        if (!resolver) continue;
+        digitPinsWired++;
+        // Seed initial state — important when the wire is already
+        // settled at sim start (e.g. examples that hard-wire a COM to GND).
+        handle7SegDigit(element, digitIdx, resolver.getCurrentState() === 'HIGH');
+        unsubscribers.push(
+          resolver.onChange((state) => {
+            handle7SegDigit(element, digitIdx, state === 'HIGH');
+          }),
+        );
+      } else {
+        const pin = getArduinoPinHelper(pinName);
+        if (pin === null) continue;
+        digitPinsWired++;
+        unsubscribers.push(
+          pinManager.onPinChange(pin, (_: number, state: boolean) => {
+            handle7SegDigit(element, digitIdx, state);
+          }),
+        );
+      }
     }
     // No digit-select pin wired → direct drive (common cathode tied to GND,
     // or a single display being lit unconditionally). Enable every digit
@@ -330,13 +352,24 @@ PartSimulationRegistry.register('7segment', {
     // Subscribe to A-G + DP segment pins.
     for (let i = 0; i < SEGMENT_NAMES.length; i++) {
       const seg = SEGMENT_NAMES[i];
-      const arduinoPin = getArduinoPinHelper(seg);
-      if (arduinoPin === null) continue;
-      unsubscribers.push(
-        pinManager.onPinChange(arduinoPin, (_: number, state: boolean) => {
-          handle7SegSegment(element, i, state);
-        }),
-      );
+      if (useResolver) {
+        const resolver = getPinResolver!(seg);
+        if (!resolver) continue;
+        handle7SegSegment(element, i, resolver.getCurrentState() === 'HIGH');
+        unsubscribers.push(
+          resolver.onChange((state) => {
+            handle7SegSegment(element, i, state === 'HIGH');
+          }),
+        );
+      } else {
+        const arduinoPin = getArduinoPinHelper(seg);
+        if (arduinoPin === null) continue;
+        unsubscribers.push(
+          pinManager.onPinChange(arduinoPin, (_: number, state: boolean) => {
+            handle7SegSegment(element, i, state);
+          }),
+        );
+      }
     }
 
     return () => unsubscribers.forEach((u) => u());
