@@ -189,8 +189,11 @@ const MAPPERS: Record<string, Mapper> = {
     if (!pins) return null;
     return {
       cards: [`D_${comp.id} ${pins[0]} ${pins[1]} D1N4148`],
+      // Source: LTSpice-Libraries / Linear Tech standard.dio (OnSemi origin).
+      // Adds reverse-recovery time (tt=20n) so AC/transient behaviour is
+      // correct at MHz speeds. Original Bv/Ibv preserved for breakdown.
       modelsUsed: new Set([
-        '.model D1N4148 D(Is=2.52n N=1.752 Rs=0.568 Ibv=0.1u Bv=100 Cjo=4p M=0.333 Vj=0.5)',
+        '.model D1N4148 D(Is=2.52n Rs=.568 N=1.752 Cjo=4p M=.4 tt=20n Bv=100 Ibv=0.1u)',
       ]),
     };
   },
@@ -211,7 +214,10 @@ const MAPPERS: Record<string, Mapper> = {
     };
   },
 
-  // BJT real part numbers — NPN
+  // BJT real part numbers — NPN. Phase 2: full Gummel-Poon parameters sourced
+  // from LTSpice-Libraries (Linear Tech standard.bjt). These include junction
+  // capacitances (CJC/CJE) and transit times (TF/TR/ITF/VTF/XTF) so the parts
+  // model AC and switching behaviour correctly, not just DC saturation.
   'bjt-2n2222': (comp, netLookup) => {
     const c = netLookup('C');
     const b = netLookup('B');
@@ -219,7 +225,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!c || !b || !e) return null;
     return {
       cards: [`Q_${comp.id} ${c} ${b} ${e} Q2N2222`],
-      modelsUsed: new Set(['.model Q2N2222 NPN(Is=14.34f Bf=200 Vaf=74 Rb=10 Rc=1)']),
+      modelsUsed: new Set([
+        '.model Q2N2222 NPN(IS=1E-14 VAF=100 BF=200 IKF=0.3 XTB=1.5 BR=3 CJC=8E-12 CJE=25E-12 TR=100E-9 TF=400E-12 ITF=1 VTF=2 XTF=3 RB=10 RC=.3 RE=.2)',
+      ]),
     };
   },
   'bjt-bc547': (comp, netLookup) => {
@@ -229,7 +237,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!c || !b || !e) return null;
     return {
       cards: [`Q_${comp.id} ${c} ${b} ${e} QBC547`],
-      modelsUsed: new Set(['.model QBC547 NPN(Is=7.05f Bf=378 Vaf=85 Rb=10 Rc=1.32)']),
+      modelsUsed: new Set([
+        '.model QBC547 NPN(IS=2.39E-14 NF=1.008 ISE=3.545E-15 NE=1.541 BF=294.3 IKF=0.1357 VAF=63.2 NR=1.004 ISC=6.272E-14 NC=1.243 BR=7.946 IKR=0.1144 VAR=25.9 RB=1 IRB=1u RBM=1 RE=0.4683 RC=0.85 XTB=0 EG=1.11 XTI=3 CJE=1.358E-11 VJE=0.65 MJE=0.3279 TF=4.391E-10 XTF=120 VTF=2.643 ITF=0.7495 CJC=3.728E-12 VJC=0.3997 MJC=0.2955 XCJC=0.6193 TR=1E-32)',
+      ]),
     };
   },
   'bjt-2n3055': (comp, netLookup) => {
@@ -239,7 +249,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!c || !b || !e) return null;
     return {
       cards: [`Q_${comp.id} ${c} ${b} ${e} Q2N3055`],
-      modelsUsed: new Set(['.model Q2N3055 NPN(Is=974f Bf=70 Vaf=100 Rb=0.5 Rc=0.05)']),
+      modelsUsed: new Set([
+        '.model Q2N3055 NPN(BF=73 BR=2.66 RB=.81 RC=.0856 RE=.000856 CJC=1000P PC=.75 MC=.33 TR=.5703U IS=2.37E-8 CJE=415P PE=.75 ME=.5 TF=99.52N NE=1.26 IK=1)',
+      ]),
     };
   },
 
@@ -251,7 +263,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!c || !b || !e) return null;
     return {
       cards: [`Q_${comp.id} ${c} ${b} ${e} Q2N3906`],
-      modelsUsed: new Set(['.model Q2N3906 PNP(Is=1.41f Bf=180 Vaf=18.7 Rb=10)']),
+      modelsUsed: new Set([
+        '.model Q2N3906 PNP(IS=1E-14 VAF=100 BF=200 IKF=0.4 XTB=1.5 BR=4 CJC=4.5E-12 CJE=10E-12 RB=20 RC=0.1 RE=0.1 TR=250E-9 TF=350E-12 ITF=1 VTF=2 XTF=3)',
+      ]),
     };
   },
   'bjt-bc557': (comp, netLookup) => {
@@ -261,7 +275,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!c || !b || !e) return null;
     return {
       cards: [`Q_${comp.id} ${c} ${b} ${e} QBC557`],
-      modelsUsed: new Set(['.model QBC557 PNP(Is=6.73f Bf=250 Vaf=80 Rb=10)']),
+      modelsUsed: new Set([
+        '.model QBC557 PNP(IS=3.83E-14 NF=1.008 ISE=1.22E-14 NE=1.528 BF=344.4 IKF=0.08039 VAF=21.11 NR=1.005 ISC=2.85E-13 NC=1.28 BR=14.84 IKR=0.047 VAR=32.02 RB=1 IRB=1u RBM=1 RE=0.6202 RC=0.5713 XTB=0 EG=1.11 XTI=3 CJE=1.23E-11 VJE=0.6106 MJE=0.378 TF=5.60E-10 XTF=3.414 VTF=5.23 ITF=0.1483 CJC=1.08E-11 VJC=0.1022 MJC=0.3563 XCJC=0.6288 TR=1E-32)',
+      ]),
     };
   },
 
@@ -1024,18 +1040,23 @@ const MAPPERS: Record<string, Mapper> = {
       cards,
       modelsUsed: new Set([
         `.model RELAY_SW SW(Vt=${threshold} Vh=${hysteresis} Ron=0.05 Roff=1G)`,
-        '.model D1N4148 D(Is=2.52n N=1.752 Rs=0.568 Ibv=0.1u Bv=100)',
+        // Must match the canonical D1N4148 in `diode-1n4148` exactly, or
+        // the netlist dedupe Set will emit two `.model D1N4148` lines.
+        '.model D1N4148 D(Is=2.52n Rs=.568 N=1.752 Cjo=4p M=.4 tt=20n Bv=100 Ibv=0.1u)',
       ]),
     };
   },
 
-  // ── Schottky diodes (Vf ≈ 0.3–0.45 V at 1 A) ────────────────────────────
+  // ── Schottky diodes (Vf ≈ 0.3–0.45 V at 1 A). Phase 2: LTSpice models
+  // sourced from OnSemi via Linear Tech standard.dio.
   'diode-1n5817': (comp, netLookup) => {
     const pins = twoPin(comp, netLookup, 'A', 'C');
     if (!pins) return null;
     return {
       cards: [`D_${comp.id} ${pins[0]} ${pins[1]} D1N5817`],
-      modelsUsed: new Set(['.model D1N5817 D(Is=3.3u N=1 Rs=0.025 Bv=20 Ibv=10m Cjo=120p)']),
+      modelsUsed: new Set([
+        '.model D1N5817 D(Is=31.7u Rs=.051 N=1.373 Cjo=190p M=.3 Eg=.69 Xti=2 Bv=20 Ibv=10m)',
+      ]),
     };
   },
   'diode-1n5819': (comp, netLookup) => {
@@ -1043,7 +1064,9 @@ const MAPPERS: Record<string, Mapper> = {
     if (!pins) return null;
     return {
       cards: [`D_${comp.id} ${pins[0]} ${pins[1]} D1N5819`],
-      modelsUsed: new Set(['.model D1N5819 D(Is=3u N=1 Rs=0.027 Bv=40 Ibv=10m Cjo=150p)']),
+      modelsUsed: new Set([
+        '.model D1N5819 D(Is=31.7u Rs=.051 N=1.373 Cjo=110p M=.35 Eg=.69 Xti=2 Bv=40 Ibv=10m)',
+      ]),
     };
   },
 
