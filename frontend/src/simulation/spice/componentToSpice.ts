@@ -281,18 +281,26 @@ const MAPPERS: Record<string, Mapper> = {
     };
   },
 
-  // MOSFETs — NMOS
-  // Level=1 Shichman-Hodges with moderate W/L avoids ngspice convergence
-  // issues seen with Level=3 + W=0.1 m (which is literally 100 mm channel
-  // width — unphysical and causes .op to hang).
+  // MOSFETs — NMOS. Phase 2.1: VDMOS macro-models from LTSpice-Libraries.
+  // VDMOS is 3-terminal (D G S) — no body, no L/W — and uses physical
+  // parameters (Ron, Vto, gate capacitances, Qg) instead of Level=1's
+  // process-level Kp/W/L. Models reflect manufacturer datasheets so the
+  // simulator now sees real Ron, switching speed, and gate-charge effects.
+  //
+  // Library coverage gaps: IRF540 and IRF9540 are not in LTSpice's
+  // `standard.mos`. IRF530 (100 V N-MOS, same series) substitutes for IRF540.
+  // IRF9640 (200 V P-MOS) substitutes for IRF9540 — both close enough that
+  // a casual circuit drawn around "IRF540" still behaves correctly.
   'mosfet-2n7000': (comp, netLookup) => {
     const d = netLookup('D');
     const g = netLookup('G');
     const s = netLookup('S');
     if (!d || !g || !s) return null;
     return {
-      cards: [`M_${comp.id} ${d} ${g} ${s} ${s} M2N7000 L=2u W=200u`],
-      modelsUsed: new Set(['.model M2N7000 NMOS(Level=1 Vto=1.6 Kp=50u Lambda=0.01)']),
+      cards: [`M_${comp.id} ${d} ${g} ${s} M2N7000`],
+      modelsUsed: new Set([
+        '.model M2N7000 VDMOS(Rg=3 Vto=1.6 Rd=0 Rs=.75 Rb=.14 Kp=.17 mtriode=1.25 Cgdmax=80p Cgdmin=12p Cgs=50p Cjo=50p Is=.04p Vds=60 Ron=2 Qg=1.5n)',
+      ]),
     };
   },
   'mosfet-irf540': (comp, netLookup) => {
@@ -301,8 +309,12 @@ const MAPPERS: Record<string, Mapper> = {
     const s = netLookup('S');
     if (!d || !g || !s) return null;
     return {
-      cards: [`M_${comp.id} ${d} ${g} ${s} ${s} MIRF540 L=2u W=2m`],
-      modelsUsed: new Set(['.model MIRF540 NMOS(Level=1 Vto=3 Kp=20u Lambda=0.01)']),
+      cards: [`M_${comp.id} ${d} ${g} ${s} MIRF540`],
+      modelsUsed: new Set([
+        // Substitute: LTSpice ships IRF530 (same TO-220, 100 V, slightly
+        // smaller die). Close enough for the canvas.
+        '.model MIRF540 VDMOS(Rg=3 Vto=4 Rd=50m Rs=12m Rb=60m Kp=5 lambda=.01 Cgdmax=1n Cgdmin=.26n Cgs=.2n Cjo=.4n Is=52p Vds=100 Ron=160m Qg=26n)',
+      ]),
     };
   },
 
@@ -313,10 +325,17 @@ const MAPPERS: Record<string, Mapper> = {
     const s = netLookup('S');
     if (!d || !g || !s) return null;
     return {
-      cards: [`M_${comp.id} ${d} ${g} ${s} ${s} MIRF9540 L=2u W=2m`],
-      modelsUsed: new Set(['.model MIRF9540 PMOS(Level=1 Vto=-3 Kp=20u Lambda=0.01)']),
+      cards: [`M_${comp.id} ${d} ${g} ${s} MIRF9540`],
+      modelsUsed: new Set([
+        // Substitute: LTSpice ships IRF9640. 200 V vs IRF9540's 100 V, but
+        // identical pin-out and similar Vto. The `pchan` keyword is what
+        // tells the VDMOS engine to flip polarity.
+        '.model MIRF9540 VDMOS(pchan Rg=3 Vto=-3.5 Rd=.15 Rs=.15 Rb=.15 Kp=8 lambda=.01 mtriode=.5 Cgdmax=1.5n Cgdmin=.07n Cgs=1n Cjo=1n Is=38p Vds=-200 Ron=.5 Qg=44n)',
+      ]),
     };
   },
+  // FQP27P06 has no good LTSpice equivalent — kept on Level=1 PMOS with the
+  // historical parameter set. Upgrade when a Fairchild VDMOS model is found.
   'mosfet-fqp27p06': (comp, netLookup) => {
     const d = netLookup('D');
     const g = netLookup('G');
