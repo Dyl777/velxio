@@ -282,15 +282,44 @@ export interface SpiceVoltageSource {
 }
 
 interface SpiceResolvedConfig {
-  /** Vcc/2 by default — the threshold above which a voltage reads HIGH.
-   *  Phase 3 will replace this with per-logic-family thresholds. */
+  /** Voltage above which a node reads HIGH.  For Schmitt-trigger
+   *  families this is Vt+ (the rising-edge threshold); for ordinary
+   *  CMOS/TTL/AVR it's the family's Vih (typical 0.7·Vcc for CMOS,
+   *  2.0V for TTL/LVCMOS33). */
   thresholdHigh: number;
-  /** Below this voltage reads LOW. Hysteresis between low/high prevents
-   *  oscillation; Phase 3 will refine per Schmitt-trigger inputs. */
+  /** Voltage below which a node reads LOW.  Set equal to thresholdHigh
+   *  for no hysteresis; set lower for Schmitt-trigger behavior (e.g.
+   *  Vt- < Vt+ on 74HC14).  Inputs between thresholdLow and
+   *  thresholdHigh stay in their previous state — that's what creates
+   *  the noise-rejection dead band. */
   thresholdLow: number;
   /** Vcc — used to synthesise a digital voltage when the resolver
    *  reports a logic state synchronously and SPICE hasn't yet solved. */
   vcc: number;
+}
+
+/**
+ * Convenience: build a `SpiceResolvedConfig` from a `LogicFamily`.
+ * Hysteresis thresholds are used when the family declares them
+ * (Schmitt-trigger inputs), otherwise vih/vil are used.  Keeps callers
+ * from having to know whether a specific family has Schmitt behavior.
+ *
+ * Import-style note: this helper lives here (rather than in
+ * LogicFamilies.ts) so PinResolver stays the single import callers
+ * need for resolver construction.  Re-exports avoid the import cycle.
+ */
+export function configFromLogicFamily(family: {
+  vcc: number;
+  vil: number;
+  vih: number;
+  vil_schmitt?: number;
+  vih_schmitt?: number;
+}): SpiceResolvedConfig {
+  return {
+    thresholdHigh: family.vih_schmitt ?? family.vih,
+    thresholdLow: family.vil_schmitt ?? family.vil,
+    vcc: family.vcc,
+  };
 }
 
 /**

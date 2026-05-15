@@ -20,11 +20,13 @@ import { isBoardComponent, boardPinToNumber } from '../utils/boardPinMapping';
 import {
   createDefaultPinResolver,
   createSpiceResolvedPinResolver,
+  configFromLogicFamily,
   isActiveDevice,
   type PinResolver,
 } from '../simulation/PinResolver';
 import { BOARD_PIN_GROUPS } from '../simulation/spice/boardPinGroups';
 import { getMixedModeScheduler } from '../simulation/spice/MixedModeScheduler';
+import { getBoardLogicFamily } from '../simulation/LogicFamilies';
 
 // Side-effect imports: register every web component we'll create at runtime.
 // `@wokwi/elements` covers the upstream catalog; `../velxio-elements` adds
@@ -417,14 +419,21 @@ export const DynamicComponent: React.FC<DynamicComponentProps> = ({
         const detailed = traceDetailed(id, componentPinName, 0);
         if (detailed.crossedActiveDevice) {
           const scheduler = getMixedModeScheduler();
-          // Threshold = vcc/2 with no hysteresis. Phase 3 will replace
-          // this with per-logic-family Vil/Vih + Schmitt.
-          const half = ownerBoardVcc / 2;
-          return createSpiceResolvedPinResolver(id, componentPinName, scheduler, {
-            thresholdHigh: half,
-            thresholdLow: half,
-            vcc: ownerBoardVcc,
-          });
+          // Phase 3: threshold model from the OWNER BOARD's logic family
+          // (e.g. AVR_HC for Uno, LVCMOS33 for ESP32).  Includes Schmitt
+          // hysteresis when the family declares it.  Phase 3 continued
+          // will let individual components override via a `logicFamily`
+          // field in components-metadata.json so e.g. a 74HC14 input
+          // gets Schmitt behavior even when driven from an AVR.
+          const family = ownerBoard
+            ? getBoardLogicFamily(ownerBoard.boardKind)
+            : { vcc: ownerBoardVcc, vil: ownerBoardVcc / 2, vih: ownerBoardVcc / 2 };
+          return createSpiceResolvedPinResolver(
+            id,
+            componentPinName,
+            scheduler,
+            configFromLogicFamily(family),
+          );
         }
 
         return createDefaultPinResolver(
