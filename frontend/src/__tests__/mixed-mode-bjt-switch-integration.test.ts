@@ -20,7 +20,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildNetlist } from '../simulation/spice/NetlistBuilder';
-import { runNetlist } from '../simulation/spice/SpiceEngine';
+import { runNetlist } from './helpers/testSolver';
 import {
   getMixedModeScheduler,
   __resetMixedModeScheduler,

@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { digitalExamples } from '../data/examples-digital';
 import { buildNetlist } from '../simulation/spice/NetlistBuilder';
 import { mappedMetadataIds } from '../simulation/spice/componentToSpice';
-import { runNetlist } from '../simulation/spice/SpiceEngine';
+import { runNetlist } from './helpers/testSolver';
 import { exampleProjects } from '../data/examples';
 import type { ExampleProject } from '../data/examples';
 

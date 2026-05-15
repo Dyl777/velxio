@@ -22,7 +22,7 @@
  * single solver-error warning and the rest of the rules are skipped.
  */
 import { buildNetlist } from '../spice/NetlistBuilder';
-import { runNetlist as runSpice } from '../spice/SpiceEngine';
+import { runNetlist as runSpice } from '../spice/runNetlist';
 import type { BuildNetlistInput, ElectricalSolveResult } from '../spice/types';
 
 export type WarningSeverity = 'error' | 'warning';

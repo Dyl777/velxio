@@ -31,6 +31,7 @@ import type {
   SolveOptions,
   SolveVector,
 } from '../ports/SolverPort';
+export type { SolveVector } from '../ports/SolverPort';
 import {
   loadNgSpiceForNode,
   type NgSpiceEmscriptenModule,
@@ -179,25 +180,36 @@ export class NgSpiceNodeAdapter implements SolverPort {
   private initialiseNgspice(): void {
     if (!this.api) throw new Error('API not ready');
     this.api.nospiceinit();
-    // Pass 0 (null) for every callback — ngspice tolerates null and
-    // skips the corresponding event.  This sidesteps a
-    // "function signature mismatch" we hit when feeding addFunction
-    // pointers; investigate the worker's exact emscripten build
-    // settings later if we need real callbacks (progress / stderr).
     const rc = this.api.init(0, 0, 0, 0, 0, 0, 0);
     if (rc !== 0) throw new Error(`ngSpice_Init returned ${rc}`);
     this.api.setInputPath('/');
     this.api.command('set xspice_enabled');
     this.api.command('source /spinit');
+    // Convergence helpers — relaxed gmin lets op-amp + diode circuits
+    // bias correctly without needing `.option gmin=...` in every
+    // user netlist.  Method=gear maxord=2 stabilises stiff transient
+    // solves involving B-source clamps and reactive networks.
+    this.api.command('set noaskquit');
+    this.api.command('option gmin=1e-10 gminsteps=20 method=gear maxord=2');
   }
 
   async loadCircuit(netlist: string): Promise<void> {
     await this.init();
     if (!this.module || !this.api || !this.module._velxio_fs) throw new Error('not ready');
-    // The build doesn't export `_malloc`, so we can't construct the
-    // char** the `ngSpice_Circ` API needs from JS. Workaround: write
-    // the netlist to the virtual FS and ask ngspice to `source` it.
-    this.module._velxio_fs.writeFile('/circuit.spc', netlist);
+    this.api.command('remcirc');
+    // Strip any inline analysis directives so the engine does NOT
+    // auto-run them during `source` — the SolverPort owns analysis
+    // timing.  Running them twice (once via source, once via the
+    // explicit `solve()` command) leaves the second pass with an
+    // empty plot.
+    const stripped = netlist
+      .split('\n')
+      .filter((line) => {
+        const l = line.trim().toLowerCase();
+        return !(l.startsWith('.op') || l.startsWith('.tran ') || l.startsWith('.ac '));
+      })
+      .join('\n');
+    this.module._velxio_fs.writeFile('/circuit.spc', stripped);
     const rc = this.api.command('source /circuit.spc');
     if (rc !== 0) throw new Error(`source /circuit.spc returned ${rc}`);
   }
@@ -257,6 +269,56 @@ export class NgSpiceNodeAdapter implements SolverPort {
     this.api.command(`alter ${name} dc ${dcValue}`);
   }
 
+  /**
+   * Read every vector in the current plot.  Called AFTER an analysis
+   * has run — does not re-run the analysis, which is critical
+   * because re-running creates a new plot and invalidates pointers
+   * from listCurrentVectors.
+   *
+   * Returns the result in the same shape as `solve()` so the test
+   * shim can use a unified path.
+   */
+  readAllCurrentVectors(): { vectors: Map<string, SolveVector>; rawNames: string[] } {
+    const rawNames = this.listCurrentVectors();
+    const vectors = new Map<string, SolveVector>();
+    for (const name of rawNames) {
+      const vec = this.readVector(name);
+      if (vec) vectors.set(name.toLowerCase(), vec);
+    }
+    return { vectors, rawNames };
+  }
+
+  /**
+   * Enumerate vector names in the current plot.  Returns case-
+   * preserved names — getVecInfo lookup IS case-sensitive for
+   * source-current vectors like "V_src#branch".
+   *
+   * NOT part of SolverPort — adapter-specific helper used by the
+   * legacy-test compatibility shim while we migrate the suite off
+   * eecircuit-engine.  Once all tests opt into explicit
+   * vectorsOfInterest lists, this can go away.
+   */
+  listCurrentVectors(): string[] {
+    if (!this.module || !this.api) return [];
+    const plot = this.api.curPlot();
+    if (!plot) return [];
+    const arrPtr = this.api.allVecs(plot);
+    if (!arrPtr) return [];
+    const heapu32 = this.module._velxio_heapu32;
+    if (!heapu32) return [];
+    const names: string[] = [];
+    // ngSpice_AllVecs returns a NULL-terminated array of char*.
+    // Keep original case — getVecInfo lookup is case-sensitive for
+    // source-current vectors like "V_src#branch".
+    for (let i = 0; ; i++) {
+      const ptr = heapu32[(arrPtr >> 2) + i];
+      if (!ptr) break;
+      names.push(this.module.UTF8ToString(ptr));
+      if (i > 4096) break; // safety
+    }
+    return names;
+  }
+
   dispose(): void {
     if (this.api) {
       try { this.api.reset(); } catch { /* ignore */ }
@@ -279,15 +341,27 @@ export class NgSpiceNodeAdapter implements SolverPort {
     const heapf64 = M._velxio_heapf64;
     if (!heap32 || !heapu32 || !heapf64) return null;
     const realDataPtr = heapu32[(infoPtr + VECTOR_INFO_REALDATA_OFFSET) >> 2]!;
-    const imagDataPtr = heapu32[(infoPtr + VECTOR_INFO_IMAGDATA_OFFSET) >> 2]!;
+    const compDataPtr = heapu32[(infoPtr + VECTOR_INFO_IMAGDATA_OFFSET) >> 2]!;
     const length = heap32[(infoPtr + VECTOR_INFO_LENGTH_OFFSET) >> 2]!;
     const flags = heap32[(infoPtr + VECTOR_INFO_FLAGS_OFFSET) >> 2]!;
     const complex = (flags & VECTOR_FLAG_COMPLEX) !== 0;
-    if (!realDataPtr || length <= 0) return null;
-    const real = new Float64Array(heapf64.buffer, realDataPtr, length).slice();
-    const imag = complex && imagDataPtr
-      ? new Float64Array(heapf64.buffer, imagDataPtr, length).slice()
-      : null;
+    if (length <= 0) return null;
+    // Real vectors store doubles in realDataPtr.  Complex vectors
+    // (.ac results) store INTERLEAVED [re, im, re, im, ...] doubles
+    // in compDataPtr — realDataPtr is null.
+    if (!complex) {
+      if (!realDataPtr) return null;
+      const real = new Float64Array(heapf64.buffer, realDataPtr, length).slice();
+      return { name: name.toLowerCase(), real, imag: null };
+    }
+    if (!compDataPtr) return null;
+    const interleaved = new Float64Array(heapf64.buffer, compDataPtr, length * 2);
+    const real = new Float64Array(length);
+    const imag = new Float64Array(length);
+    for (let i = 0; i < length; i++) {
+      real[i] = interleaved[i * 2]!;
+      imag[i] = interleaved[i * 2 + 1]!;
+    }
     return { name: name.toLowerCase(), real, imag };
   }
 }

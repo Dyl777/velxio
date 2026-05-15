@@ -13,7 +13,7 @@ import {
   componentToSpice,
   PASSIVE_PRESETS,
 } from '../simulation/spice/componentToSpice';
-import { runNetlist } from '../simulation/spice/SpiceEngine';
+import { runNetlist } from './helpers/testSolver';
 
 /**
  * Fixture describing how to wire one component for the ngspice-acceptance test.

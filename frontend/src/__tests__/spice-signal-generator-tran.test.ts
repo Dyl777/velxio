@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildInputFromStore } from '../simulation/spice/storeAdapter';
 import { buildNetlist } from '../simulation/spice/NetlistBuilder';
-import { runNetlist } from '../simulation/spice/SpiceEngine';
+import { runNetlist } from './helpers/testSolver';
 import type { StoreSnapshot } from '../simulation/spice/storeAdapter';
 import type { PinSourceState } from '../simulation/spice/types';
 

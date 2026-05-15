@@ -32,7 +32,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { buildInputFromStore } from '../simulation/spice/storeAdapter';
 import { buildNetlist } from '../simulation/spice/NetlistBuilder';
 import { circuitScheduler } from '../simulation/spice/CircuitScheduler';
-import { runNetlist } from '../simulation/spice/SpiceEngine';
+import { runNetlist } from './helpers/testSolver';
 import { setAdcVoltage } from '../simulation/parts/partUtils';
 import { AVRTestHarness, adcReadProgram } from './helpers/avrTestHarness';
 
