@@ -150,7 +150,15 @@ export const SensorControlPanel: React.FC<SensorControlPanelProps> = ({
   };
 
   return (
-    <div className="sensor-control-panel" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="sensor-control-panel"
+      onClick={(e) => e.stopPropagation()}
+      // The canvas treats left mousedown on empty space as a pan gesture.
+      // Without stopping mousedown here, dragging the lux/temp/etc. slider
+      // thumb pans the canvas instead of moving the slider.
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <div className="sensor-panel-header">
         <span className="sensor-panel-title">{sensorName || def.title}</span>
         <button className="sensor-panel-close" onClick={onClose} title={t('editor.sensorPanel.close')}>
