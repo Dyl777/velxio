@@ -184,8 +184,14 @@ class QemuManager:
             # ttyAMA1 → GPIO shim protocol
             '-serial', f'tcp:127.0.0.1:{inst.gpio_port},server,nowait',
             '-append',
+            # No `quiet`: surface kernel boot messages to ttyAMA0 so the
+            # user sees progress while the 5.4 GiB Pi OS rootfs comes up
+            # (~30-60 s wall on a QEMU-emulated Cortex-A53 quad). No
+            # `init=/bin/sh`: let systemd run normally so a real
+            # `serial-getty@ttyAMA0` lands the user at a login prompt
+            # instead of a silent non-interactive shell.
             'console=ttyAMA0 root=/dev/mmcblk0p2 rootwait rw '
-            'dwc_otg.lpm_enable=0 quiet init=/bin/sh',
+            'dwc_otg.lpm_enable=0',
         ]
 
         logger.info('Launching QEMU for %s: %s', inst.client_id, ' '.join(cmd))

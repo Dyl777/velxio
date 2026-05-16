@@ -436,6 +436,83 @@ async def test_provider_is_cached_probe(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_sidecar_invalidates_on_sha_mismatch(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the exact bug that broke Pi 3 in May 2026.
+
+    Background: the original cache-hit probe was size-only. A
+    re-baked SD image with the same byte count but different
+    contents (e.g. an in-place edit of /etc/systemd/system/) was
+    served stale from the cache after a deploy. The sidecar SHA
+    check now catches this — manifest SHA bump invalidates the
+    cache even when size is unchanged.
+    """
+    payload_v1 = b"original-bytes" * 1024  # 14 KiB
+    # Same size, different content — exactly the bug pattern.
+    payload_v2 = b"modified-bytes" * 1024
+    assert len(payload_v1) == len(payload_v2)
+
+    spec_v1 = _spec("rootfs.img", "rootfs", payload_v1)
+    iset_v1 = ImageSetSpec(id="set-a", description="", images=(spec_v1,))
+    provider_v1, dl_v1 = _build_provider(tmp_path, iset_v1, {"rootfs": payload_v1})
+
+    # First get with v1 manifest: download + verify + sidecar written.
+    await provider_v1.get("set-a")
+    assert len(dl_v1.calls) == 1
+
+    # Now simulate a redeploy with a manifest SHA bump (same size).
+    # Build a brand-new provider against the same cache dir but with the
+    # v2 spec.
+    spec_v2 = _spec("rootfs.img", "rootfs", payload_v2)
+    iset_v2 = ImageSetSpec(id="set-a", description="", images=(spec_v2,))
+    dl_v2 = FakeDownloader({"rootfs": payload_v2})
+    provider_v2 = BootImageProvider(
+        manifest=_manifest(iset_v2),
+        downloader=dl_v2,
+        cache_dir=tmp_path / "cache",  # reuse v1's cache dir
+    )
+
+    # is_cached must report False even though the file at that path
+    # exists with the right size — the sidecar SHA mismatches v2.
+    assert provider_v2.is_cached("set-a") is False
+
+    # And calling get() re-fetches and overwrites with v2 bytes.
+    result = await provider_v2.get("set-a")
+    assert result["rootfs.img"].read_bytes() == payload_v2
+    assert len(dl_v2.calls) == 1
+
+    # Final state: v2 is cached, sidecar matches v2 SHA.
+    assert provider_v2.is_cached("set-a") is True
+
+
+@pytest.mark.asyncio
+async def test_provider_missing_sidecar_treats_file_as_invalid(
+    tmp_path: Path,
+) -> None:
+    """A pre-existing file without a sidecar (legacy cache, or manual
+    drop-in) is treated as not cached so the provider re-materialises
+    it and writes the sidecar this time."""
+    payload = b"hello" * 200
+    spec = _spec("kernel8.img", "kernel-pi3", payload)
+    iset = ImageSetSpec(id="raspberry-pi-3", description="", images=(spec,))
+    provider, dl = _build_provider(tmp_path, iset, {"kernel-pi3": payload})
+
+    # Hand-place the cache file WITHOUT a sidecar (legacy state).
+    cache_target = tmp_path / "cache" / "raspberry-pi-3" / "kernel8.img"
+    cache_target.parent.mkdir(parents=True, exist_ok=True)
+    cache_target.write_bytes(payload)
+    assert not (cache_target.parent / "kernel8.img.sha256").exists()
+
+    # Provider must NOT trust the orphan file — it has no proof of
+    # integrity. is_cached → False, get() re-downloads.
+    assert provider.is_cached("raspberry-pi-3") is False
+    await provider.get("raspberry-pi-3")
+    assert len(dl.calls) == 1
+    assert (cache_target.parent / "kernel8.img.sha256").exists()
+
+
+@pytest.mark.asyncio
 async def test_provider_unknown_set_raises_typed_error(tmp_path: Path) -> None:
     provider = BootImageProvider(
         manifest=_manifest(),

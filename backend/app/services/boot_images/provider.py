@@ -99,21 +99,18 @@ class BootImageProvider:
     def is_cached(self, set_id: str) -> bool:
         """Sync probe used by health/status endpoints.
 
-        Only checks file presence + size — does NOT re-hash on every
-        probe (a 3 GiB SHA256 every health check would be wasteful).
-        Full hash verification still happens on ``get()`` when a cache
-        slot is populated.
+        Uses the same sidecar-SHA check ``_is_valid_cached`` does so
+        a manifest bump correctly reports "not cached yet" until the
+        next ``get()`` re-materialises the file.
         """
         try:
             spec = self._manifest.get(set_id)
         except BootImageError:
             return False
         set_dir = self._cache_dir / set_id
-        for img in spec.images:
-            target = set_dir / img.name
-            if not target.is_file() or target.stat().st_size != img.size_bytes:
-                return False
-        return True
+        return all(
+            self._is_valid_cached(set_dir / img.name, img) for img in spec.images
+        )
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -148,24 +145,49 @@ class BootImageProvider:
         return out
 
     @staticmethod
-    def _is_valid_cached(path: Path, spec: BootImageSpec) -> bool:
-        """Cheap cache-hit probe — file presence + size match only.
+    def _sidecar(target: Path) -> Path:
+        """Sidecar file recording the SHA256 of the cached payload.
+
+        Written atomically (temp + rename) after a successful
+        download+verify, read on every cache-validity probe. Lets the
+        provider detect manifest SHA bumps without re-hashing
+        multi-GiB files on every container start.
+        """
+        return target.parent / f"{target.name}.sha256"
+
+    @classmethod
+    def _is_valid_cached(cls, path: Path, spec: BootImageSpec) -> bool:
+        """O(1) cache-hit probe — presence + size + sidecar SHA match.
 
         We deliberately do NOT re-hash the file on every probe. The
         5.4 GiB Pi 3 SD image takes ~30 s to SHA256, and that cost
         would be paid on every container boot pre-warm AND every user
-        request that triggers ``provider.get()``. Cache contents only
-        change via this class's own atomic-rename ladder, which always
-        verifies SHA256 before promoting a file into the cache slot.
-        Operators who manually edit the cache directory get the
-        behaviour they deserve.
+        request that triggers ``provider.get()``.
 
-        If you suspect cache corruption, delete the cache directory
-        and the next ``get()`` re-downloads + re-verifies.
+        Instead, after a successful materialise we write a sidecar
+        ``<name>.sha256`` containing the expected hash and trust it on
+        subsequent probes. A manifest SHA bump invalidates the sidecar
+        even if the size is unchanged (e.g. an in-place SD image edit
+        that ends up the exact same byte count), forcing a re-fetch.
+
+        If the sidecar is missing (legacy cache from before this
+        change, or operator tampering) the file is treated as invalid
+        and re-fetched. Manual operators who want to inject a file can
+        write the sidecar themselves: ``sha256sum file | cut -d' ' -f1
+        > file.sha256``.
         """
         if not path.is_file():
             return False
-        return path.stat().st_size == spec.size_bytes
+        if path.stat().st_size != spec.size_bytes:
+            return False
+        sidecar = cls._sidecar(path)
+        if not sidecar.is_file():
+            return False
+        try:
+            recorded = sidecar.read_text(encoding="ascii").strip().lower()
+        except OSError:
+            return False
+        return recorded == spec.sha256.lower()
 
     async def _fetch_and_verify(
         self, img: BootImageSpec, target: Path,
@@ -175,33 +197,47 @@ class BootImageProvider:
             await asyncio.to_thread(
                 verify_sha256, target, img.sha256, label=img.name,
             )
-            return
-
-        # Compressed path: download → verify wire-format sha → decompress
-        # → verify decompressed sha → atomic rename to final cache slot.
-        with tempfile.TemporaryDirectory(
-            dir=target.parent, prefix=".staging-",
-        ) as staging:
-            staging_dir = Path(staging)
-            compressed_path = staging_dir / f"{img.name}.{img.compressed.encoding}"
-            await self._downloader.fetch(img.asset_id, compressed_path)
-            await asyncio.to_thread(
-                verify_sha256,
-                compressed_path,
-                img.compressed.sha256,
-                label=f"{img.name} (compressed)",
-            )
-            decoded = staging_dir / img.name
-            if img.compressed.encoding == "zstd":
-                await asyncio.to_thread(decompress_zstd, compressed_path, decoded)
-            else:
-                raise BootImageError(
-                    f"unsupported compression {img.compressed.encoding!r}"
+        else:
+            # Compressed path: download → verify wire-format sha →
+            # decompress → verify decompressed sha → atomic rename to
+            # final cache slot.
+            with tempfile.TemporaryDirectory(
+                dir=target.parent, prefix=".staging-",
+            ) as staging:
+                staging_dir = Path(staging)
+                compressed_path = (
+                    staging_dir / f"{img.name}.{img.compressed.encoding}"
                 )
-            await asyncio.to_thread(
-                verify_sha256,
-                decoded,
-                img.sha256,
-                label=f"{img.name} (decompressed)",
-            )
-            await asyncio.to_thread(decoded.replace, target)
+                await self._downloader.fetch(img.asset_id, compressed_path)
+                await asyncio.to_thread(
+                    verify_sha256,
+                    compressed_path,
+                    img.compressed.sha256,
+                    label=f"{img.name} (compressed)",
+                )
+                decoded = staging_dir / img.name
+                if img.compressed.encoding == "zstd":
+                    await asyncio.to_thread(decompress_zstd, compressed_path, decoded)
+                else:
+                    raise BootImageError(
+                        f"unsupported compression {img.compressed.encoding!r}"
+                    )
+                await asyncio.to_thread(
+                    verify_sha256,
+                    decoded,
+                    img.sha256,
+                    label=f"{img.name} (decompressed)",
+                )
+                await asyncio.to_thread(decoded.replace, target)
+        # Record the expected SHA next to the file so future cache
+        # probes can detect manifest bumps without re-hashing the
+        # whole file.  Sidecar write is atomic (temp + rename) so a
+        # process crash mid-write can't leave a half-written hash.
+        await asyncio.to_thread(self._write_sidecar, target, img.sha256)
+
+    @classmethod
+    def _write_sidecar(cls, target: Path, sha256: str) -> None:
+        sidecar = cls._sidecar(target)
+        tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        tmp.write_text(sha256.lower() + "\n", encoding="ascii")
+        tmp.replace(sidecar)
