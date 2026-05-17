@@ -73,6 +73,20 @@ export interface LedcUpdate {
   duty_pct: number;
   gpio?: number;
 }
+/** Canonical (SignalRouter) LEDC duty event — channel + duty only.
+ *  The frontend resolves channel→signal_id→pin via its SignalRouter
+ *  mirror.  Emitted alongside the legacy `ledc_update` during rollout. */
+export interface LedcDuty {
+  channel: number;
+  duty_pct: number;
+}
+/** GPIO Matrix routing event — `gpio_out_sel[gpio]` was set to
+ *  `signal_id`.  Maintained by the backend SignalRouter; emitted on
+ *  every observed change so the frontend mirror stays in lock-step. */
+export interface GpioRouting {
+  gpio: number;
+  signal_id: number;
+}
 export interface WifiStatus {
   status: string;
   ssid?: string;
@@ -94,6 +108,18 @@ export class Esp32Bridge {
   onPinChange: ((gpioPin: number, state: boolean) => void) | null = null;
   onPinDir: ((gpioPin: number, dir: 0 | 1) => void) | null = null;
   onLedcUpdate: ((update: LedcUpdate) => void) | null = null;
+  /** SignalRouter-aware companion to `onLedcUpdate`.  The store wires
+   *  this to `makeLedcDutyHandler` which routes channel→pin via the
+   *  per-board SignalRouter; `onLedcUpdate` stays around for back-compat
+   *  during the rollout and is removed once SignalRouter is stable. */
+  onLedcDuty: ((duty: LedcDuty) => void) | null = null;
+  /** Fires whenever the backend observes a write to `gpio_out_sel[N]`.
+   *  The store's handler updates the per-board SignalRouter mirror so
+   *  subsequent `onLedcDuty` events can resolve channel→pin correctly. */
+  onGpioRouting: ((routing: GpioRouting) => void) | null = null;
+  /** Pin is no longer routed to any peripheral (firmware reset the
+   *  matrix entry). */
+  onGpioRoutingClear: ((gpio: number) => void) | null = null;
   onWs2812Update: ((channel: number, pixels: Ws2812Pixel[]) => void) | null = null;
   /**
    * ePaper SSD168x backend rendering. Backend decodes SPI traffic in
@@ -270,6 +296,18 @@ export class Esp32Bridge {
             `[Esp32Bridge:${this.boardId}] ledc_update ch=${msg.data.channel} duty=${msg.data.duty_pct}% gpio=${msg.data.gpio}`,
           );
           this.onLedcUpdate?.(msg.data as unknown as LedcUpdate);
+          break;
+        }
+        case 'ledc_duty': {
+          this.onLedcDuty?.(msg.data as unknown as LedcDuty);
+          break;
+        }
+        case 'gpio_routing': {
+          this.onGpioRouting?.(msg.data as unknown as GpioRouting);
+          break;
+        }
+        case 'gpio_routing_clear': {
+          this.onGpioRoutingClear?.(msg.data.gpio as number);
           break;
         }
         case 'ws2812_update': {

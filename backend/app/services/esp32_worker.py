@@ -406,27 +406,60 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     _camera_frame_count = [0]               # ESP32-CAM frame trace counter
     _CRASH_STR      = b'Cache disabled but cached memory region accessed'
     _REBOOT_STR     = b'Rebooting...'
-    # LEDC channel → GPIO pin (populated from GPIO out_sel sync events)
-    # ESP32 signal indices: 72-79 = LEDC HS ch 0-7, 80-87 = LEDC LS ch 0-7
-    _ledc_gpio_map: dict[int, int] = {}
 
-    def _refresh_ledc_gpio_map() -> None:
-        """Scan gpio_out_sel[40] registers and update _ledc_gpio_map.
+    # ── Signal routing (GPIO Matrix mirror) ───────────────────────────────
+    # The SignalRouter owns the per-GPIO routing table that the firmware
+    # writes through `GPIO_FUNCx_OUT_SEL_CFG_REG[x]`. We currently fill it
+    # by polling `gpio_out_sel[40]` once every 100 ms in the LEDC poll
+    # thread (and diffing); the C-side plugin will gain a synchronous
+    # callback in a future bump that turns the poll into a push without
+    # touching this code path.
+    #
+    # The old `_ledc_gpio_map: dict[int, int]` (channel → gpio) has been
+    # subsumed by the router's reverse index — call
+    # `_signal_router.pins_for_signal(SIG_LEDC_*+channel)` instead.
+    from app.services.signal_router import SignalRouter  # noqa: E402
+    from app.services.esp32_signals import (  # noqa: E402
+        ledc_signal_for_channel,
+        SIG_LEDC_HS_CH0_OUT_IDX,
+        SIG_LEDC_LS_CH_LAST,
+    )
+    _signal_router = SignalRouter()
 
-        Called eagerly from the 0x5000 LEDC duty callback on cache miss,
-        and periodically from the LEDC polling thread.
+    def _refresh_signal_routing() -> None:
+        """Scan `gpio_out_sel[40]` and reconcile the SignalRouter.
+
+        Emits `gpio_routing` for every routing that changed since the
+        last scan and `gpio_routing_clear` for routings that disappeared,
+        so the frontend's mirror stays in lock-step without re-sending
+        the whole table.  Idempotent: a scan with no changes emits no
+        events.
+
+        Called every 100 ms from the LEDC poll thread.  Also called
+        eagerly from the 0x5000 LEDC duty callback so the first duty
+        write after `ledcAttachPin` doesn't race the periodic poll.
         """
         try:
             out_sel_ptr = lib.qemu_picsimlab_get_internals(2)
             if not out_sel_ptr:
                 return
             out_sel = (ctypes.c_uint32 * 40).from_address(out_sel_ptr)
+            snapshot: dict[int, int] = {}
             for gpio_pin in range(40):
-                signal = int(out_sel[gpio_pin]) & 0xFF
-                if 72 <= signal <= 87:
-                    ledc_ch = signal - 72
-                    if _ledc_gpio_map.get(ledc_ch) != gpio_pin:
-                        _ledc_gpio_map[ledc_ch] = gpio_pin
+                signal_id = int(out_sel[gpio_pin]) & 0xFF
+                # 0..71 / 88..255 are signal sources velxio doesn't
+                # model yet; include them in the snapshot only if the
+                # firmware actively routed them so future peripherals
+                # can opt in without code changes here.
+                if SIG_LEDC_HS_CH0_OUT_IDX <= signal_id <= SIG_LEDC_LS_CH_LAST:
+                    snapshot[gpio_pin] = signal_id
+            changed, cleared = _signal_router.replace_snapshot(snapshot)
+            for gpio_pin, signal_id in changed:
+                _emit({'type': 'gpio_routing',
+                       'gpio': gpio_pin,
+                       'signal_id': signal_id})
+            for gpio_pin in cleared:
+                _emit({'type': 'gpio_routing_clear', 'gpio': gpio_pin})
         except Exception:
             pass
 
@@ -721,10 +754,27 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             if marker == 0x5000:  # LEDC duty change (from esp32_ledc.c)
                 ledc_ch = (direction >> 8) & 0x0F
                 intensity = direction & 0xFF  # 0-100 percentage
-                gpio = _ledc_gpio_map.get(ledc_ch, -1)
-                if gpio == -1:
-                    _refresh_ledc_gpio_map()
-                    gpio = _ledc_gpio_map.get(ledc_ch, -1)
+
+                # Refresh the GPIO Matrix snapshot first so the routing
+                # is current — emits any gpio_routing events the
+                # frontend needs to update its SignalRouter mirror
+                # BEFORE the duty arrives.
+                _refresh_signal_routing()
+
+                # New canonical event (SignalRouter consumer): channel +
+                # duty only, no gpio.  The frontend resolves channel →
+                # signal_id → pins via its mirror.
+                _emit({'type': 'ledc_duty',
+                       'channel': ledc_ch,
+                       'duty_pct': intensity})
+
+                # Legacy event (still consumed by the old broadcast/memo
+                # path during rollout).  Resolve channel→gpio from the
+                # router's reverse index — same value the legacy
+                # `_ledc_gpio_map.get(ledc_ch, -1)` returned.
+                sig_id = ledc_signal_for_channel(ledc_ch)
+                pins = _signal_router.pins_for_signal(sig_id)
+                gpio = pins[0] if pins else -1
                 _emit({'type': 'ledc_update', 'channel': ledc_ch,
                        'duty': intensity,
                        'duty_pct': intensity,
@@ -1343,17 +1393,31 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 if ptr is None or ptr == 0:
                     continue
                 arr = (ctypes.c_float * 16).from_address(ptr)
-                _refresh_ledc_gpio_map()
+                # Reconcile the GPIO Matrix mirror first; any routing
+                # changes since the last poll are emitted as
+                # `gpio_routing` events so frontend's SignalRouter is
+                # in sync before duty updates land.
+                _refresh_signal_routing()
                 for ch in range(16):
                     duty_pct = float(arr[ch])
                     if abs(duty_pct - _last_duty[ch]) < 0.01:
                         continue
                     _last_duty[ch] = duty_pct
                     if duty_pct > 0:
-                        gpio = _ledc_gpio_map.get(ch, -1)
+                        rounded = round(duty_pct, 2)
+                        # New canonical event for the SignalRouter
+                        # path — channel + duty only.
+                        _emit({'type': 'ledc_duty',
+                               'channel': ch,
+                               'duty_pct': rounded})
+                        # Legacy event still consumed by the old
+                        # ledc_update handler during rollout.
+                        sig_id = ledc_signal_for_channel(ch)
+                        pins = _signal_router.pins_for_signal(sig_id)
+                        gpio = pins[0] if pins else -1
                         _emit({'type': 'ledc_update', 'channel': ch,
-                               'duty': round(duty_pct, 2),
-                               'duty_pct': round(duty_pct, 2),
+                               'duty': rounded,
+                               'duty_pct': rounded,
                                'gpio': gpio})
             except Exception:
                 pass

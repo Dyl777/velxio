@@ -732,60 +732,124 @@ The typical maximum duty is 8192 (13-bit timer). For LED brightness: `duty_pct /
 | HS ch 0-7   | 72-79                |
 | LS ch 0-7   | 80-87                |
 
-### 9.2 LEDC → GPIO Mapping (out_sel mechanism)
+### 9.2 LEDC → GPIO Mapping (Signal Router architecture)
 
-The original problem was that `ledc_update {channel: N}` arrived at the frontend but it was unknown which physical GPIO was controlled by that channel — that association is established dynamically in firmware via `ledcAttachPin(gpio, channel)`.
+The ESP32 SoC's IO_MUX + GPIO Matrix decouples *signal sources* (LEDC
+channels, RMT channels, UART TX, SPI MOSI, …) from physical *GPIO
+pins* via a 40-entry routing table (`gpio_out_sel[40]`). Each entry
+records the signal id that drives the pin; legally one signal can
+drive multiple pins, or a pin can be unrouted. velxio models this
+1-to-1 with a **SignalRouter** abstraction on both sides of the
+WebSocket.
 
-**Complete solution flow:**
+**Why this matters:** previously the worker emitted
+`ledc_update {channel, duty, gpio}` where `gpio` was resolved from a
+worker-local `_ledc_gpio_map` cache. When the cache hadn't seen the
+GPIO matrix write yet (race window during `ledcAttachPin`), `gpio`
+came through as `-1` and the frontend fell back to
+`PinManager.broadcastPwm` — fanning the duty to ALL PWM listeners.
+With two servos in the same duty-range that produced the multi-
+servo blink reported in project
+`5218f9e3-136d-43b3-bba1-6cebde21e1a4`.
 
-1. **Firmware calls** `ledcAttachPin(gpio, ch)` — writes the LEDC channel signal index (72-87) into `GPIO_FUNCX_OUT_SEL_CFG_REG[gpio]`.
+**Architecture (post-SignalRouter):**
 
-2. **QEMU detects** the write to the `out_sel` register and fires a sync event (`psync_irq_handler`). The modified code in `hw/gpio/esp32_gpio.c` encodes the signal index in bits 8-15 of the event:
-   ```c
-   // Modification in esp32_gpio.c (psync_irq_handler function / out_sel write):
-   // BEFORE: only the GPIO number
-   qemu_set_irq(s->gpios_sync[0], (0x2000 | n));
-   // AFTER: GPIO in bits 7:0, signal index in bits 15:8
-   qemu_set_irq(s->gpios_sync[0], (0x2000 | ((value & 0xFF) << 8) | (n & 0xFF)));
-   ```
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ C plugin (libqemu-xtensa.so) — esp32_gpio.c                     │
+│ ───────────────────────────────────────────────────────────────│
+│ ledcAttachPin → write to gpio_out_sel[N] → psync_irq_handler    │
+│ fires 0x2000 marker event (existing mechanism).                 │
+│                                                                 │
+│ LEDC duty change → 0x5000 marker event.                         │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼  ctypes callback
+┌─────────────────────────────────────────────────────────────────┐
+│ Worker (esp32_worker.py)                                        │
+│ ───────────────────────────────────────────────────────────────│
+│ _signal_router: SignalRouter()  — mirrors gpio_out_sel[40]      │
+│                                                                 │
+│ _refresh_signal_routing():                                      │
+│   - reads gpio_out_sel[40] via qemu_picsimlab_get_internals(2)  │
+│   - replace_snapshot() returns the diff                         │
+│   - emits `gpio_routing {gpio, signal_id}` for each change      │
+│   - emits `gpio_routing_clear {gpio}` for cleared entries       │
+│                                                                 │
+│ 0x5000 callback / ledc_poll_thread:                             │
+│   - first calls _refresh_signal_routing() so routing is current │
+│   - emits `ledc_duty {channel, duty_pct}` (canonical, no gpio)  │
+│   - also emits legacy `ledc_update {channel, duty, gpio}` for   │
+│     back-compat during the rollout                              │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼  WebSocket
+┌─────────────────────────────────────────────────────────────────┐
+│ Frontend (Esp32Bridge → useSimulatorStore → SignalRouter TS)    │
+│ ───────────────────────────────────────────────────────────────│
+│ signalRouterMap[boardId]: SignalRouter — mirror of backend's    │
+│                                                                 │
+│ onGpioRouting(gpio, sig)         → router.updateRouting(...)    │
+│ onGpioRoutingClear(gpio)         → router.clearRouting(gpio)    │
+│ onLedcDuty(channel, duty_pct):                                  │
+│   sig = ledcSignalForChannel(channel)                           │
+│   for pin in router.pinsForSignal(sig):                         │
+│     pinManager.updatePwm(pin, duty_pct / 100)                   │
+│                                                                 │
+│ Zero broadcasts. Zero memos. Multi-pin routing supported.       │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-3. **The Python worker** (`esp32_worker.py`) decodes the event in `_on_dir_change(slot=-1, direction)`:
-   ```python
-   if slot == -1:
-       marker = direction & 0xF000
-       if marker == 0x2000:   # GPIO_FUNCX_OUT_SEL_CFG change
-           gpio_pin = direction & 0xFF
-           signal   = (direction >> 8) & 0xFF
-           if 72 <= signal <= 87:
-               ledc_ch = signal - 72   # channel 0-15
-               _ledc_gpio_map[ledc_ch] = gpio_pin
-   ```
+**Key files:**
 
-4. **`ledc_update` includes `gpio`** — polling includes the resolved `gpio` field:
-   ```python
-   gpio = _ledc_gpio_map.get(ch, -1)
-   _emit({'type': 'ledc_update', 'channel': ch,
-          'duty': duty, 'duty_pct': round(duty / 8192 * 100, 1),
-          'gpio': gpio})   # -1 if ledcAttachPin has not been called yet
-   ```
+| Layer | File | Role |
+|---|---|---|
+| Worker | `backend/app/services/signal_router.py` | `SignalRouter` + `replace_snapshot` diffing |
+| Worker | `backend/app/services/esp32_signals.py` | Signal-id constants (LEDC HS 72-79, LS 80-87, …) + `ledc_signal_for_channel()` |
+| Worker | `backend/app/services/esp32_worker.py` | Polls `gpio_out_sel`, emits `gpio_routing` + `ledc_duty` |
+| Bridge | `frontend/src/simulation/Esp32Bridge.ts` | WebSocket → typed callbacks (`onGpioRouting`, `onLedcDuty`) |
+| Frontend | `frontend/src/simulation/SignalRouter.ts` | TS mirror of the Python class |
+| Frontend | `frontend/src/simulation/esp32-signals.ts` | TS mirror of the signal-id constants |
+| Store | `frontend/src/store/useSimulatorStore.ts` | `makeLedcDutyHandler` routes channel → pin via SignalRouter |
 
-5. **The frontend store** (`useSimulatorStore.ts`) routes the PWM to the correct GPIO:
-   ```typescript
-   bridge.onLedcUpdate = (update) => {
-     const targetPin = (update.gpio !== undefined && update.gpio >= 0)
-       ? update.gpio
-       : update.channel;          // fallback: use channel number
-     boardPm.updatePwm(targetPin, update.duty_pct / 100);
-   };
-   ```
+**Adding a new peripheral that routes through the GPIO Matrix:**
 
-6. **`SimulatorCanvas`** subscribes components to the PWM of the correct pin and adjusts the opacity of the visual element:
-   ```typescript
-   const pwmUnsub = pinManager.onPwmChange(pin, (_p, duty) => {
-     const el = document.getElementById(component.id);
-     if (el) el.style.opacity = String(duty);   // duty 0.0–1.0
-   });
-   ```
+1. Append the signal-id constant in `esp32_signals.py` AND
+   `esp32-signals.ts`. (e.g. `SIG_RMT_OUT_IDX = 87`).
+2. Add the range to `_refresh_signal_routing()` in the worker so
+   writes to `gpio_out_sel` matching that range are emitted as
+   `gpio_routing` events.
+3. Backend: emit `<peripheral>_event {channel, ...payload}` (no
+   gpio field — keep the routing concern on the frontend).
+4. Frontend: add an `on<Peripheral>Event` callback in
+   `Esp32Bridge`, route through `router.pinsForSignal(sig_id)` in
+   the store.
+
+No changes needed to `PinManager` or `SignalRouter`. Every routed
+peripheral fans out cleanly.
+
+**The Python and TS implementations are 1-to-1.** When a constant
+changes in `esp32_signals.py`, change it in `esp32-signals.ts` the
+same commit. Tests in `test/backend/unit/test_signal_router.py` and
+`frontend/src/__tests__/SignalRouter.test.ts` mirror each other —
+both cover the multi-servo regression scenario (project
+`5218f9e3`, two servos on GPIO 13/12 via LEDC channels 0/1).
+
+### 9.3 Visual PWM (legacy callback path)
+
+`SimulatorCanvas` subscribes components to the PWM of the correct
+pin and adjusts the opacity of the visual element:
+
+```typescript
+const pwmUnsub = pinManager.onPwmChange(pin, (_p, duty) => {
+  const el = document.getElementById(component.id);
+  if (el) el.style.opacity = String(duty);   // duty 0.0–1.0
+});
+```
+
+This stays unchanged — the SignalRouter refactor is upstream of
+`PinManager`, not downstream. Components keep subscribing by pin
+number; SignalRouter is what decides which pin a duty event reaches.
 
 ---
 

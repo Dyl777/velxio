@@ -5,6 +5,8 @@ import { Cyw43Bridge } from '../simulation/cyw43';
 import { RiscVSimulator } from '../simulation/RiscVSimulator';
 import { Esp32C3Simulator } from '../simulation/Esp32C3Simulator';
 import { PinManager } from '../simulation/PinManager';
+import { SignalRouter } from '../simulation/SignalRouter';
+import { ledcSignalForChannel } from '../simulation/esp32-signals';
 import {
   VirtualDS1307,
   VirtualTempSensor,
@@ -527,16 +529,29 @@ class Esp32BridgeShim {
 }
 
 // ── Shared LEDC update handler (used by addBoard, setBoardType, initSimulator) ─
+//
+// Two handlers ship side by side during the SignalRouter rollout:
+//
+//   * makeLedcUpdateHandler — legacy, consumes the old `ledc_update`
+//     event (with embedded gpio). Drops the update when gpio=-1 and
+//     multiple PWM consumers are registered, to avoid the multi-servo
+//     blink symptom (see commit 77bf897). Kept until the SignalRouter
+//     path has logged a full prod cycle without regressions.
+//
+//   * makeLedcDutyHandler — canonical, consumes the new `ledc_duty`
+//     event (channel + duty only) and resolves channel → pins via the
+//     per-board SignalRouter mirror. Zero broadcasts, zero memos,
+//     multi-pin routing supported.
+//
+// Both run unconditionally; updatePwm is idempotent so two handlers
+// firing for the same (pin, duty) are a no-op.  Once the legacy path
+// is retired, makeLedcUpdateHandler + broadcastPwm + pwmListenerPinCount
+// are deleted in the same commit.
+
 function makeLedcUpdateHandler(boardId: string) {
-  // Per-board memo of the last gpio each LEDC channel was mapped to.
-  // The backend's _ledc_gpio_map can briefly emit gpio=-1 for the first
-  // duty change after attach (before gpio_out_sel is populated). Once we
-  // observe a real gpio for a channel, route subsequent gpio=-1 events
-  // on that channel back to the same pin instead of broadcasting —
-  // broadcasting to multiple consumers in the same duty-range
-  // (e.g. two servos in a solar-tracker / pan-tilt project) makes them
-  // mirror whichever was written last, producing the
-  // "servo blinks between two positions" symptom.
+  // Per-channel gpio memo: when the backend's _ledc_gpio_map emits
+  // gpio=-1 (race window during attach), use the last-known gpio for
+  // this channel to avoid corrupting multi-servo setups.
   const channelGpioMemo = new Map<number, number>();
 
   return (update: { channel: number; duty_pct: number; gpio?: number }) => {
@@ -549,22 +564,43 @@ function makeLedcUpdateHandler(boardId: string) {
       boardPm.updatePwm(update.gpio, dutyCycle);
       return;
     }
-
-    // gpio unknown. Recover from the per-channel memo first.
     const rememberedGpio = channelGpioMemo.get(update.channel);
     if (rememberedGpio !== undefined) {
       boardPm.updatePwm(rememberedGpio, dutyCycle);
       return;
     }
-
-    // No memo yet for this channel. Broadcasting is only safe with a
-    // single PWM consumer; with 2+ consumers any duty-range overlap
-    // (two servos, two motors, ...) makes them mirror. Drop the update
-    // and wait for the next ledc_update with a real gpio; the worker's
-    // GPIO out_sel poll populates the map within a few ms of attach.
     if (boardPm.pwmListenerPinCount() <= 1) {
       boardPm.broadcastPwm(dutyCycle);
     }
+  };
+}
+
+function makeLedcDutyHandler(boardId: string) {
+  return (duty: { channel: number; duty_pct: number }) => {
+    const boardPm = pinManagerMap.get(boardId);
+    const router = signalRouterMap.get(boardId);
+    if (!boardPm || !router) return;
+    const dutyCycle = duty.duty_pct / 100;
+    const signalId = ledcSignalForChannel(duty.channel);
+    const pins = router.pinsForSignal(signalId);
+    // Multi-pin routing: one LEDC channel CAN legally drive multiple
+    // pins via the GPIO Matrix (rare but documented in TRM). Iterate
+    // all of them — each gets its own updatePwm call.
+    for (const pin of pins) {
+      boardPm.updatePwm(pin, dutyCycle);
+    }
+  };
+}
+
+function makeGpioRoutingHandler(boardId: string) {
+  return (routing: { gpio: number; signal_id: number }) => {
+    signalRouterMap.get(boardId)?.updateRouting(routing.gpio, routing.signal_id);
+  };
+}
+
+function makeGpioRoutingClearHandler(boardId: string) {
+  return (gpio: number) => {
+    signalRouterMap.get(boardId)?.clearRouting(gpio);
   };
 }
 
@@ -574,6 +610,12 @@ const simulatorMap = new Map<
   AVRSimulator | RP2040Simulator | RiscVSimulator | Esp32C3Simulator | Esp32BridgeShim
 >();
 const pinManagerMap = new Map<string, PinManager>();
+// Per-board ESP32 GPIO Matrix mirror.  Populated for boards whose kind
+// is an ESP32 variant (others don't have a GPIO Matrix in the same
+// sense; AVR/RP2040 wire signals to pins directly without the IO_MUX).
+// Lifecycle parallels pinManagerMap — created in addBoard / setBoardType
+// / initSimulator, deleted in removeBoard / cleanup.
+const signalRouterMap = new Map<string, SignalRouter>();
 const bridgeMap = new Map<string, RaspberryPi3Bridge>();
 const esp32BridgeMap = new Map<string, Esp32Bridge>();
 // Pico W WiFi (CYW43439) bridge — created lazily, only when boardKind === 'pi-pico-w'.
@@ -939,7 +981,11 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
             return { boards, ...(isActive ? { running: false } : {}) };
           });
         };
+        signalRouterMap.set(id, new SignalRouter());
         bridge.onLedcUpdate = makeLedcUpdateHandler(id);
+        bridge.onLedcDuty = makeLedcDutyHandler(id);
+        bridge.onGpioRouting = makeGpioRoutingHandler(id);
+        bridge.onGpioRoutingClear = makeGpioRoutingClearHandler(id);
         bridge.onWs2812Update = (channel, pixels) => {
           // Forward WS2812 pixel data to any DOM element with id=`ws2812-{id}-{channel}`
           // (set by NeoPixel components rendered in SimulatorCanvas).
@@ -1048,6 +1094,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
       getBoardSimulator(boardId)?.stop();
       simulatorMap.delete(boardId);
       pinManagerMap.delete(boardId);
+      signalRouterMap.delete(boardId);
       const bridge = getBoardBridge(boardId);
       if (bridge) {
         bridge.disconnect();
@@ -1589,7 +1636,11 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
             return { boards, ...(isActive ? { running: false } : {}) };
           });
         };
+        signalRouterMap.set(boardId, new SignalRouter());
         bridge.onLedcUpdate = makeLedcUpdateHandler(boardId);
+        bridge.onLedcDuty = makeLedcDutyHandler(boardId);
+        bridge.onGpioRouting = makeGpioRoutingHandler(boardId);
+        bridge.onGpioRoutingClear = makeGpioRoutingClearHandler(boardId);
         bridge.onWs2812Update = (channel, pixels) => {
           const eventTarget = document.getElementById(`ws2812-${boardId}-${channel}`);
           if (eventTarget) {
@@ -1687,7 +1738,11 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
             return { boards, ...(isActive ? { running: false } : {}) };
           });
         };
+        signalRouterMap.set(boardId, new SignalRouter());
         bridge.onLedcUpdate = makeLedcUpdateHandler(boardId);
+        bridge.onLedcDuty = makeLedcDutyHandler(boardId);
+        bridge.onGpioRouting = makeGpioRoutingHandler(boardId);
+        bridge.onGpioRoutingClear = makeGpioRoutingClearHandler(boardId);
         bridge.onWs2812Update = (channel, pixels) => {
           const eventTarget = document.getElementById(`ws2812-${boardId}-${channel}`);
           if (eventTarget) {
