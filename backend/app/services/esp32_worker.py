@@ -418,12 +418,30 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     # The old `_ledc_gpio_map: dict[int, int]` (channel → gpio) has been
     # subsumed by the router's reverse index — call
     # `_signal_router.pins_for_signal(SIG_LEDC_*+channel)` instead.
-    from app.services.signal_router import SignalRouter  # noqa: E402
-    from app.services.esp32_signals import (  # noqa: E402
-        ledc_signal_for_channel,
-        SIG_LEDC_HS_CH0_OUT_IDX,
-        SIG_LEDC_LS_CH_LAST,
-    )
+    #
+    # `app.*` is not on sys.path inside this subprocess; mirror the same
+    # importlib fallback pattern used for esp32_flash_image (further down
+    # this file) so the worker can find its sibling modules without
+    # depending on the backend's package layout.
+    try:
+        from app.services.signal_router import SignalRouter  # type: ignore[import-not-found] # noqa: E402
+        from app.services.esp32_signals import (  # type: ignore[import-not-found] # noqa: E402
+            ledc_signal_for_channel,
+            SIG_LEDC_HS_CH0_OUT_IDX,
+            SIG_LEDC_LS_CH_LAST,
+        )
+    except ImportError:
+        import importlib.util as _ilu, pathlib as _pl
+        _here = _pl.Path(__file__).parent
+        for _name in ('signal_router', 'esp32_signals'):
+            _spec = _ilu.spec_from_file_location(_name, _here / f'{_name}.py')
+            _mod = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
+            _spec.loader.exec_module(_mod)        # type: ignore[union-attr]
+            sys.modules[_name] = _mod
+        SignalRouter = sys.modules['signal_router'].SignalRouter
+        ledc_signal_for_channel = sys.modules['esp32_signals'].ledc_signal_for_channel
+        SIG_LEDC_HS_CH0_OUT_IDX = sys.modules['esp32_signals'].SIG_LEDC_HS_CH0_OUT_IDX
+        SIG_LEDC_LS_CH_LAST = sys.modules['esp32_signals'].SIG_LEDC_LS_CH_LAST
     _signal_router = SignalRouter()
 
     def _refresh_signal_routing() -> None:
