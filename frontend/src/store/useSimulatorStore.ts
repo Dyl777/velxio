@@ -528,16 +528,41 @@ class Esp32BridgeShim {
 
 // ── Shared LEDC update handler (used by addBoard, setBoardType, initSimulator) ─
 function makeLedcUpdateHandler(boardId: string) {
+  // Per-board memo of the last gpio each LEDC channel was mapped to.
+  // The backend's _ledc_gpio_map can briefly emit gpio=-1 for the first
+  // duty change after attach (before gpio_out_sel is populated). Once we
+  // observe a real gpio for a channel, route subsequent gpio=-1 events
+  // on that channel back to the same pin instead of broadcasting —
+  // broadcasting to multiple consumers in the same duty-range
+  // (e.g. two servos in a solar-tracker / pan-tilt project) makes them
+  // mirror whichever was written last, producing the
+  // "servo blinks between two positions" symptom.
+  const channelGpioMemo = new Map<number, number>();
+
   return (update: { channel: number; duty_pct: number; gpio?: number }) => {
     const boardPm = pinManagerMap.get(boardId);
     if (!boardPm) return;
     const dutyCycle = update.duty_pct / 100;
+
     if (update.gpio !== undefined && update.gpio >= 0) {
+      channelGpioMemo.set(update.channel, update.gpio);
       boardPm.updatePwm(update.gpio, dutyCycle);
-    } else {
-      // gpio unknown (QEMU doesn't expose gpio_out_sel for LEDC):
-      // broadcast to ALL PWM listeners. Components filter by duty range
-      // (servo accepts 0.01–0.20, LEDs use 0–1.0).
+      return;
+    }
+
+    // gpio unknown. Recover from the per-channel memo first.
+    const rememberedGpio = channelGpioMemo.get(update.channel);
+    if (rememberedGpio !== undefined) {
+      boardPm.updatePwm(rememberedGpio, dutyCycle);
+      return;
+    }
+
+    // No memo yet for this channel. Broadcasting is only safe with a
+    // single PWM consumer; with 2+ consumers any duty-range overlap
+    // (two servos, two motors, ...) makes them mirror. Drop the update
+    // and wait for the next ledc_update with a real gpio; the worker's
+    // GPIO out_sel poll populates the map within a few ms of attach.
+    if (boardPm.pwmListenerPinCount() <= 1) {
       boardPm.broadcastPwm(dutyCycle);
     }
   };
