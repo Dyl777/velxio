@@ -115,10 +115,10 @@ describe('SignalRouter — core update/lookup', () => {
 
 describe('esp32-signals — channel ↔ signal id helpers', () => {
   it.each([
-    [0,  SIG_LEDC_HS_CH0_OUT_IDX],         // 72
-    [7,  SIG_LEDC_HS_CH0_OUT_IDX + 7],     // 79
-    [8,  SIG_LEDC_LS_CH0_OUT_IDX],         // 80
-    [15, SIG_LEDC_LS_CH0_OUT_IDX + 7],     // 87
+    [0,  SIG_LEDC_HS_CH0_OUT_IDX],         // 71 (HS ch 0)
+    [7,  SIG_LEDC_HS_CH0_OUT_IDX + 7],     // 78 (HS ch 7)
+    [8,  SIG_LEDC_LS_CH0_OUT_IDX],         // 79 (LS ch 0)
+    [15, SIG_LEDC_LS_CH0_OUT_IDX + 7],     // 86 (LS ch 7)
   ])('ledcSignalForChannel(%d) roundtrips through channelForLedcSignal → %d', (channel, sig) => {
     expect(ledcSignalForChannel(channel)).toBe(sig);
     expect(channelForLedcSignal(sig)).toBe(channel);
@@ -131,9 +131,10 @@ describe('esp32-signals — channel ↔ signal id helpers', () => {
   });
 
   it('channelForLedcSignal returns null for non-LEDC signal ids', () => {
+    // 70 sits immediately below the LEDC range, 87 immediately above.
     expect(channelForLedcSignal(0)).toBeNull();
-    expect(channelForLedcSignal(71)).toBeNull();
-    expect(channelForLedcSignal(88)).toBeNull();
+    expect(channelForLedcSignal(70)).toBeNull();
+    expect(channelForLedcSignal(87)).toBeNull();
     expect(channelForLedcSignal(256)).toBeNull();
   });
 });

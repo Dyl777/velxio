@@ -9,12 +9,16 @@
  */
 
 // ── LEDC (PWM peripheral) ─────────────────────────────────────────────────
-// High-speed channels (group 0): signals 72-79 → ledc channel 0-7
-// Low-speed channels  (group 1): signals 80-87 → ledc channel 0-7
-export const SIG_LEDC_HS_CH0_OUT_IDX = 72;
-export const SIG_LEDC_HS_CH_LAST = 79;
-export const SIG_LEDC_LS_CH0_OUT_IDX = 80;
-export const SIG_LEDC_LS_CH_LAST = 87;
+// Per ESP32 TRM section 4.11, Table 4-3 (GPIO Matrix output signals):
+//   71-78 → LEDC_HS_SIG_OUT[0..7]  (high-speed channels 0-7)
+//   79-86 → LEDC_LS_SIG_OUT[0..7]  (low-speed  channels 0-7)
+// The legacy worker code used 72-87 (off by one). That bug rerouted
+// every multi-servo project's channels — see
+// backend/app/services/esp32_signals.py for the full explanation.
+export const SIG_LEDC_HS_CH0_OUT_IDX = 71;
+export const SIG_LEDC_HS_CH_LAST = 78;
+export const SIG_LEDC_LS_CH0_OUT_IDX = 79;
+export const SIG_LEDC_LS_CH_LAST = 86;
 
 /**
  * Map a velxio-style unified LEDC channel index (0..15) to its GPIO

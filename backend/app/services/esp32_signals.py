@@ -18,12 +18,24 @@ from __future__ import annotations
 
 
 # ── LEDC (PWM peripheral) ─────────────────────────────────────────────────
-# High-speed channels (group 0): signals 72-79 → ledc channel 0-7
-# Low-speed channels (group 1):  signals 80-87 → ledc channel 0-7
-SIG_LEDC_HS_CH0_OUT_IDX = 72  # add N for HS channel N (0..7)
-SIG_LEDC_HS_CH_LAST     = 79
-SIG_LEDC_LS_CH0_OUT_IDX = 80  # add N for LS channel N (0..7)
-SIG_LEDC_LS_CH_LAST     = 87
+# Per ESP32 Technical Reference Manual section 4.11, Table 4-3 (GPIO
+# Matrix output signals):
+#   71-78 → LEDC_HS_SIG_OUT[0..7]  (high-speed channels 0-7)
+#   79-86 → LEDC_LS_SIG_OUT[0..7]  (low-speed  channels 0-7)
+#
+# The legacy worker code at esp32_worker.py:426 used the off-by-one
+# range 72-87; that masked itself because the channel index encoded in
+# the 0x5000 duty callback (0..15) was internally consistent with the
+# bogus signal-id math, so single-servo demos still appeared to work.
+# Multi-servo projects (e.g. solar-tracker, project 5218f9e3) exposed
+# the bug — `ledcAttachPin(13, 0)` actually writes signal 71 to
+# gpio_out_sel[13], which the off-by-one scan REJECTED, so channel 0
+# resolved to GPIO 12 (the next servo's pin, whose signal 72 WAS in
+# range and was misinterpreted as channel 0).
+SIG_LEDC_HS_CH0_OUT_IDX = 71  # add N for HS channel N (0..7)
+SIG_LEDC_HS_CH_LAST     = 78
+SIG_LEDC_LS_CH0_OUT_IDX = 79  # add N for LS channel N (0..7)
+SIG_LEDC_LS_CH_LAST     = 86
 
 
 def ledc_signal_for_channel(channel: int) -> int:

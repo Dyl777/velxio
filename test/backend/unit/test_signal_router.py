@@ -173,10 +173,10 @@ def test_replace_snapshot_combines_changes_and_clears() -> None:
 @pytest.mark.parametrize(
     "channel,expected",
     [
-        (0,  SIG_LEDC_HS_CH0_OUT_IDX),      # 72
-        (7,  SIG_LEDC_HS_CH0_OUT_IDX + 7),  # 79
-        (8,  SIG_LEDC_LS_CH0_OUT_IDX),      # 80
-        (15, SIG_LEDC_LS_CH0_OUT_IDX + 7),  # 87
+        (0,  SIG_LEDC_HS_CH0_OUT_IDX),      # 71 (HS ch 0)
+        (7,  SIG_LEDC_HS_CH0_OUT_IDX + 7),  # 78 (HS ch 7)
+        (8,  SIG_LEDC_LS_CH0_OUT_IDX),      # 79 (LS ch 0)
+        (15, SIG_LEDC_LS_CH0_OUT_IDX + 7),  # 86 (LS ch 7)
     ],
 )
 def test_ledc_signal_for_channel_roundtrip(channel: int, expected: int) -> None:
@@ -192,9 +192,12 @@ def test_ledc_signal_for_channel_rejects_out_of_range() -> None:
 
 
 def test_channel_for_ledc_signal_returns_none_for_non_ledc() -> None:
+    # 70 is the signal immediately below the LEDC range; 87 is the
+    # signal immediately above.  Both must return None — anything
+    # else implies the constants drifted away from the ESP32 TRM.
     assert channel_for_ledc_signal(0) is None
-    assert channel_for_ledc_signal(71) is None
-    assert channel_for_ledc_signal(88) is None
+    assert channel_for_ledc_signal(70) is None
+    assert channel_for_ledc_signal(87) is None
     assert channel_for_ledc_signal(256) is None
 
 
